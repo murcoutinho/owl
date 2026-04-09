@@ -81,16 +81,15 @@ FIXEOF
   return $rc
 }
 
-# Create a feature branch for a plan in all repos that have changes
+# Create a feature branch in ALL repos under PROJECT_DIR
 create_branches() {
   local branch_name="$1"
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
     local repo_name="$(basename "$repo_root")"
 
-    # Only create branch if repo has changes (tracked or untracked)
-    if git -C "$repo_root" diff --quiet HEAD 2>/dev/null && \
-       [ -z "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+    # Skip repos with no commits yet
+    if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       continue
     fi
 
