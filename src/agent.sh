@@ -26,6 +26,14 @@ REVIEW_ITERATIONS=2
 RETRY_WAIT=600
 MAX_RETRIES=50
 
+# Models
+IMPL_MODEL="${OWL_IMPL_MODEL:-claude-sonnet-4-6}"       # Model for plan execution and fixes
+REVIEW_CLAUDE_MODEL="${OWL_REVIEW_CLAUDE_MODEL:-claude-sonnet-4-6}"  # Model for Claude reviewer
+REVIEW_CODEX_MODEL="${OWL_REVIEW_CODEX_MODEL:-gpt-5.4}"             # Model for Codex reviewer (passed via --model if set)
+
+# Review mode: "parallel" or "sequential"
+REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
+
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
@@ -235,7 +243,7 @@ IMPORTANT INSTRUCTIONS:
 - The agent handles all git operations.
 PLANEOF
 
-  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$plan_prompt_file"
+  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$IMPL_MODEL" "$plan_prompt_file"
   local exit_code=$?
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
@@ -386,32 +394,58 @@ run_review_loop() {
       done < "$manifest"
     } > "$review_prompt_file"
 
-    # Launch reviewers in parallel
-    log "Spawning Codex reviewer..."
+    # Launch reviewers
     local codex_review_file="$plan_work_dir/codex_review_$i.txt"
-    (
-      rc=0
-      retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
-      echo "$RETRY_OUTPUT"
-      exit $rc
-    ) > "$codex_review_file" 2>&1 &
-    local codex_pid=$!
-
-    log "Spawning Claude Code reviewer..."
     local claude_review_file="$plan_work_dir/claude_review_$i.txt"
-    (
-      rc=0
-      retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$review_prompt_file" || rc=$?
-      echo "$RETRY_OUTPUT"
-      exit $rc
-    ) > "$claude_review_file" 2>&1 &
-    local claude_pid=$!
-
     local codex_ok=true claude_ok=true
-    wait $codex_pid || codex_ok=false
-    log "Codex review complete (success=$codex_ok)."
-    wait $claude_pid || claude_ok=false
-    log "Claude Code review complete (success=$claude_ok)."
+
+    if [ "$REVIEW_MODE" = "parallel" ]; then
+      log "Spawning reviewers in parallel..."
+
+      (
+        rc=0
+        retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$codex_review_file" 2>&1 &
+      local codex_pid=$!
+
+      (
+        rc=0
+        retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$REVIEW_CLAUDE_MODEL" "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$claude_review_file" 2>&1 &
+      local claude_pid=$!
+
+      wait $codex_pid || codex_ok=false
+      log "Codex review complete (success=$codex_ok)."
+      wait $claude_pid || claude_ok=false
+      log "Claude Code review complete (success=$claude_ok)."
+
+    else
+      log "Running reviewers sequentially..."
+
+      log "Running Codex reviewer..."
+      (
+        rc=0
+        retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$codex_review_file" 2>&1
+      [ $? -eq 0 ] || codex_ok=false
+      log "Codex review complete (success=$codex_ok)."
+
+      log "Running Claude Code reviewer..."
+      (
+        rc=0
+        retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$REVIEW_CLAUDE_MODEL" "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$claude_review_file" 2>&1
+      [ $? -eq 0 ] || claude_ok=false
+      log "Claude Code review complete (success=$claude_ok)."
+    fi
 
     if ! $codex_ok && ! $claude_ok; then
       log "Both reviewers failed. Skipping fix phase for iteration $i."
@@ -459,7 +493,7 @@ $combined_review
 FIXEOF
 
     log "Applying fixes via Claude Code..."
-    retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$fix_prompt_file"
+    retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$IMPL_MODEL" "$fix_prompt_file"
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
 
     # Commit fixes in repos on the branch that have changes
