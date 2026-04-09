@@ -1,7 +1,17 @@
 #!/bin/bash
 #
-# Dev Agent — checks for plans every 10 minutes, executes via Claude Code,
-# then runs 2 review-fix iterations (Codex + Claude Code review → Claude Code fix)
+# Owl — autonomous dev agent
+#
+# Flow per plan:
+# 1. Find next plan
+# 2. Reset all repos to main & pull
+# 3. Execute plan via Claude Code (told to commit but NOT push)
+# 4. Create branch in repos that are ahead of main, move commits there
+# 5. Mark pending review
+# 6. Review loop: reviewer LLMs check, Claude Code fixes (commits, no push)
+# 7. Push branch, open PRs
+# 8. Switch all repos back to main
+# 9. Write done file
 #
 
 set -euo pipefail
@@ -13,8 +23,8 @@ WORK_DIR="$SCRIPT_DIR/../.work"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOCK_FILE="$SCRIPT_DIR/../.agent.lock"
 REVIEW_ITERATIONS=2
-RETRY_WAIT=600  # 10 minutes between retries
-MAX_RETRIES=50  # give up after ~8 hours of retrying
+RETRY_WAIT=600
+MAX_RETRIES=50
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
@@ -33,21 +43,17 @@ is_rate_limited() {
   echo "$output" | grep -qiE "rate.?limit|too many requests|429|overloaded|capacity|quota exceeded|try again"
 }
 
-# Fix #2: Properly capture exit code (|| true swallows it via PIPESTATUS)
 retry_on_limit() {
   local desc="$1"
   shift
   local attempt=0
-
   while true; do
     attempt=$((attempt + 1))
     local rc=0
     RETRY_OUTPUT=$("$@" 2>&1) || rc=$?
-
     if [ $rc -eq 0 ] && ! is_rate_limited "$RETRY_OUTPUT"; then
       return 0
     fi
-
     if is_rate_limited "$RETRY_OUTPUT"; then
       if [ $attempt -ge $MAX_RETRIES ]; then
         log "RATE LIMIT: $desc — gave up after $attempt attempts."
@@ -61,70 +67,109 @@ retry_on_limit() {
   done
 }
 
-apply_fixes() {
-  local review_feedback="$1"
-  local fix_prompt_file
-  fix_prompt_file=$(mktemp)
-  cat > "$fix_prompt_file" <<FIXEOF
-You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
-
-## Review Feedback
-
-$review_feedback
-FIXEOF
-
-  log "Applying fixes via Claude Code..."
-  retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$fix_prompt_file"
-  local rc=$?
-  echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE"
-  rm -f "$fix_prompt_file"
-  return $rc
-}
-
-# Create a feature branch in ALL repos under PROJECT_DIR
-create_branches() {
-  local branch_name="$1"
+# ─── Step 2: Reset all repos to main & pull ───
+reset_all_repos_to_main() {
+  log "Resetting all repos to main and pulling..."
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
     local repo_name="$(basename "$repo_root")"
 
-    # Skip repos with no commits yet
+    # Skip repos with no commits
     if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       continue
     fi
 
-    log "Creating branch '$branch_name' in $repo_name..."
-    git -C "$repo_root" checkout -b "$branch_name" 2>/dev/null || \
-      git -C "$repo_root" checkout "$branch_name" 2>/dev/null
+    local current_branch
+    current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
+
+    if [ "$current_branch" != "main" ]; then
+      log "  $repo_name: switching from '$current_branch' to main"
+      git -C "$repo_root" checkout main 2>/dev/null
+    fi
+
+    # Pull latest (non-destructive, fast-forward only)
+    git -C "$repo_root" pull --ff-only origin main 2>/dev/null || true
+
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 }
 
-# Push branches and open PRs for all repos that have the branch
-open_pull_requests() {
+# ─── Step 4/6: Create branch from repos ahead of main, move commits there ───
+create_branch_from_ahead() {
   local branch_name="$1"
-  local plan_name="$2"
-  local plan_work_dir="$3"
+  local plan_work_dir="$2"
 
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
     local repo_name="$(basename "$repo_root")"
 
-    # Skip repos not on this branch
-    local current_branch
-    current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
-    if [ "$current_branch" != "$branch_name" ]; then
+    # Skip repos with no commits
+    if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+      continue
+    fi
+
+    # Check if current branch has commits ahead of main
+    local ahead
+    ahead=$(git -C "$repo_root" rev-list main..HEAD --count 2>/dev/null || echo 0)
+
+    if [ "$ahead" -eq 0 ]; then
+      continue
+    fi
+
+    log "  $repo_name: $ahead commit(s) ahead of main → creating branch '$branch_name'"
+
+    # Save commit hashes
+    local main_hash
+    main_hash=$(git -C "$repo_root" rev-parse main)
+    local head_hash
+    head_hash=$(git -C "$repo_root" rev-parse HEAD)
+    local short_hash
+    short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
+
+    # Create branch at current HEAD
+    git -C "$repo_root" branch -f "$branch_name" HEAD 2>/dev/null
+
+    # Reset main back to where it was before (remove commits from main)
+    git -C "$repo_root" reset --hard "$main_hash" 2>/dev/null
+
+    # Switch to the new branch
+    git -C "$repo_root" checkout "$branch_name" 2>/dev/null
+
+    # Record in manifest
+    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$main_hash" "$head_hash" >> "$plan_work_dir/review_input_current.tsv"
+    printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
+
+  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+}
+
+# ─── Step 7: Push branches and open PRs ───
+push_and_open_prs() {
+  local branch_name="$1"
+  local plan_name="$2"
+  local plan_file="$3"
+  local plan_work_dir="$4"
+  local review_rounds_completed="$5"
+  local review_rounds_total="$6"
+
+  local plan_content
+  plan_content=$(cat "$plan_file")
+
+  while IFS= read -r -d '' repo_dir; do
+    local repo_root="$(dirname "$repo_dir")"
+    local repo_name="$(basename "$repo_root")"
+
+    # Skip repos that don't have this branch
+    if ! git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
       continue
     fi
 
     # Skip if no commits on branch beyond main
     if [ -z "$(git -C "$repo_root" log main.."$branch_name" --oneline 2>/dev/null)" ]; then
-      log "No commits on branch in $repo_name. Switching back to main."
-      git -C "$repo_root" checkout main 2>/dev/null
-      git -C "$repo_root" branch -d "$branch_name" 2>/dev/null
+      git -C "$repo_root" branch -d "$branch_name" 2>/dev/null || true
       continue
     fi
 
     log "Pushing branch '$branch_name' in $repo_name..."
+    git -C "$repo_root" checkout "$branch_name" 2>/dev/null
     git -C "$repo_root" push -u origin "$branch_name" 2>/dev/null
 
     log "Opening PR in $repo_name..."
@@ -132,16 +177,17 @@ open_pull_requests() {
     pr_url=$(cd "$repo_root" && gh pr create \
       --title "[owl] ${plan_name%.md}" \
       --body "$(cat <<EOF
+## ${plan_name%.md}
+
+**Review rounds completed:** ${review_rounds_completed} / ${review_rounds_total}
+
 ## Plan
 
-Automated PR created by Owl dev agent.
+\`\`\`
+${plan_content}
+\`\`\`
 
-See plan: \`${plan_name}\`
-
-## Commits
-
-$(git -C "$repo_root" log main.."$branch_name" --oneline)
-
+---
 Generated by [Owl](https://github.com/murcoutinho/owl)
 EOF
 )" 2>&1) || true
@@ -153,64 +199,97 @@ EOF
       log "Failed to create PR in $repo_name."
     fi
 
-    # Switch back to main
-    git -C "$repo_root" checkout main 2>/dev/null
-
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 }
 
-commit_all_repos() {
-  local msg="$1"
-  local manifest_file="$2"
-  local _pwd="$3"
-
-  : > "$manifest_file"
-
+# ─── Step 8: Switch all repos back to main ───
+switch_all_to_main() {
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
-
-    if git -C "$repo_root" diff --quiet HEAD 2>/dev/null && \
-       [ -z "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-      continue
-    fi
-
-    local before="NONE"
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      before="$(git -C "$repo_root" rev-parse HEAD)"
-    fi
-
-    log "Committing changes in $repo_name..."
-    git -C "$repo_root" add -A 2>/dev/null
-
-    if git -C "$repo_root" commit -m "[dev-agent] $msg" 2>/dev/null; then
-      local after
-      after="$(git -C "$repo_root" rev-parse HEAD)"
-      local short_hash
-      short_hash="$(git -C "$repo_root" rev-parse --short HEAD)"
-      log "Committed in $repo_name ($short_hash)."
-
-      printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$before" "$after" >> "$manifest_file"
-      printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$_pwd/commits.tsv"
-    else
-      log "Nothing to commit in $repo_name."
+      git -C "$repo_root" checkout main 2>/dev/null || true
     fi
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 }
 
+# ─── Execute plan ───
+execute_plan() {
+  local plan_file="$1"
+  local plan_name="$(basename "$plan_file")"
 
+  log "========================================="
+  log "Found plan: $plan_name"
+  log "========================================="
+
+  local plan_content
+  plan_content="$(cat "$plan_file")"
+
+  local work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
+  local plan_work_dir="$WORK_DIR/$work_id"
+  mkdir -p "$plan_work_dir"
+
+  local branch_name="owl/${plan_name%.md}"
+
+  # ── Step 2: Reset to main & pull ──
+  reset_all_repos_to_main
+
+  # ── Step 3: Execute plan via Claude Code ──
+  log "[Step 3] Executing plan via Claude Code..."
+  cd "$PROJECT_DIR"
+
+  local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
+  cat > "$plan_prompt_file" <<PLANEOF
+$plan_content
+
+IMPORTANT INSTRUCTIONS:
+- Commit your changes to the current branch when done.
+- Do NOT push to any remote. The agent handles pushing.
+- Do NOT create branches. Work on the current branch.
+PLANEOF
+
+  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$plan_prompt_file"
+  local exit_code=$?
+  local exec_output="$RETRY_OUTPUT"
+  echo "$exec_output" >> "$LOG_FILE"
+  echo "$exec_output" > "$plan_work_dir/execution.log"
+
+  if [ $exit_code -ne 0 ] || [ -z "$exec_output" ] || echo "$exec_output" | grep -qi "^Execution error$"; then
+    log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
+    switch_all_to_main
+    return 1
+  fi
+
+  log "Plan execution completed."
+
+  # ── Step 4: Create branch from repos ahead of main ──
+  log "[Step 4] Creating branches from repos ahead of main..."
+  : > "$plan_work_dir/review_input_current.tsv"
+  create_branch_from_ahead "$branch_name" "$plan_work_dir"
+
+  # Rename current manifest as round 1 input
+  cp "$plan_work_dir/review_input_current.tsv" "$plan_work_dir/review_input_1.tsv"
+
+  # ── Step 5: Mark pending ──
+  echo "$plan_file" > "$plan_work_dir/pending"
+  echo "$branch_name" > "$plan_work_dir/branch"
+
+  # ── Step 6: Review loop ──
+  run_review_loop "$plan_file" "$plan_name" "$plan_work_dir"
+}
+
+# ─── Review loop ───
 run_review_loop() {
   local plan_file="$1"
   local plan_name="$2"
   local plan_work_dir="$3"
 
-  # Ensure we're on the right branch if resuming
   local branch_name=""
   [ -f "$plan_work_dir/branch" ] && branch_name=$(cat "$plan_work_dir/branch")
+
+  # Ensure we're on the right branch
   if [ -n "$branch_name" ]; then
     while IFS= read -r -d '' repo_dir; do
       local repo_root="$(dirname "$repo_dir")"
-      # Only checkout if the branch exists in this repo
       if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
         git -C "$repo_root" checkout "$branch_name" 2>/dev/null
       fi
@@ -224,24 +303,7 @@ run_review_loop() {
   fi
 
   local review_rounds_completed=$reviews_done
-
-  # Fix #6: On resume, commit any uncommitted changes from an interrupted fix phase
-  if [ "$reviews_done" -gt 0 ]; then
-    local has_uncommitted=false
-    while IFS= read -r -d '' repo_dir; do
-      local repo_root="$(dirname "$repo_dir")"
-      if ! git -C "$repo_root" diff --quiet HEAD 2>/dev/null || \
-         [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-        has_uncommitted=true
-        break
-      fi
-    done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
-
-    if $has_uncommitted; then
-      log "Found uncommitted changes from interrupted fix phase. Committing..."
-      commit_all_repos "$plan_name — interrupted fix recovery" "$plan_work_dir/review_input_$((reviews_done + 1)).tsv" "$plan_work_dir"
-    fi
-  fi
+  local reviews_skipped=0
 
   for i in $(seq $((reviews_done + 1)) $REVIEW_ITERATIONS); do
     log "-----------------------------------------"
@@ -251,11 +313,12 @@ run_review_loop() {
     local manifest="$plan_work_dir/review_input_$i.tsv"
 
     if [ ! -s "$manifest" ]; then
-      log "No manifest for round $i. Skipping this round."
+      log "No manifest for round $i. Skipping."
+      reviews_skipped=$((reviews_skipped + 1))
       continue
     fi
 
-    # Build review instructions with repo paths and commit ranges (LLM reads the diff itself)
+    # Build review prompt — tell the LLM where to look, it reads the diff itself
     local review_prompt_file="$plan_work_dir/review_prompt_$i.txt"
     {
       echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
@@ -271,7 +334,7 @@ run_review_loop() {
       done < "$manifest"
     } > "$review_prompt_file"
 
-    # Fix #3: Propagate reviewer exit code from subshell
+    # Launch reviewers in parallel
     log "Spawning Codex reviewer..."
     local codex_review_file="$plan_work_dir/codex_review_$i.txt"
     (
@@ -300,6 +363,7 @@ run_review_loop() {
 
     if ! $codex_ok && ! $claude_ok; then
       log "Both reviewers failed. Skipping fix phase for iteration $i."
+      reviews_skipped=$((reviews_skipped + 1))
       continue
     fi
 
@@ -328,29 +392,67 @@ $claude_review"
       break
     fi
 
+    # ── Fix phase: same pattern — Claude commits, no push ──
     log "[Iteration $i/$REVIEW_ITERATIONS] Fix phase"
 
-    local fix_output
-    fix_output=$(cd "$PROJECT_DIR" && apply_fixes "$combined_review")
-    echo "$fix_output" > "$plan_work_dir/fixes_$i.log"
+    local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
+    cat > "$fix_prompt_file" <<FIXEOF
+You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
-    log "Fixes applied for iteration $i."
-    commit_all_repos "$plan_name — review fix iteration $i" "$plan_work_dir/review_input_$((i + 1)).tsv" "$plan_work_dir"
+IMPORTANT: Commit your fixes to the current branch. Do NOT push.
+
+## Review Feedback
+
+$combined_review
+FIXEOF
+
+    log "Applying fixes via Claude Code..."
+    retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$fix_prompt_file"
+    echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
+
+    # Record fix commits for next review round manifest
+    local next_manifest="$plan_work_dir/review_input_$((i + 1)).tsv"
+    : > "$next_manifest"
+    while IFS= read -r -d '' repo_dir; do
+      local repo_root="$(dirname "$repo_dir")"
+      local repo_name="$(basename "$repo_root")"
+      if [ -n "$branch_name" ] && git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
+        local current_branch
+        current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
+        if [ "$current_branch" = "$branch_name" ]; then
+          # Check if there are new commits after the last known
+          local prev_head
+          prev_head=$(tail -1 "$plan_work_dir/review_input_$i.tsv" 2>/dev/null | cut -f4)
+          local cur_head
+          cur_head=$(git -C "$repo_root" rev-parse HEAD)
+          if [ "$prev_head" != "$cur_head" ]; then
+            local short_hash
+            short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
+            printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "${prev_head:-NONE}" "$cur_head" >> "$next_manifest"
+            printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
+          fi
+        fi
+      fi
+    done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
     review_rounds_completed=$i
     echo "reviews_done=$i" > "$plan_work_dir/state"
   done
 
-  # --- Open PRs for all repos with changes on this branch ---
-  local branch_name=""
-  [ -f "$plan_work_dir/branch" ] && branch_name=$(cat "$plan_work_dir/branch")
+  # ── Step 7: Push and open PRs ──
+  local reviews_successful=$((review_rounds_completed - reviews_skipped))
   if [ -n "$branch_name" ]; then
-    log "Opening pull requests for branch: $branch_name"
-    open_pull_requests "$branch_name" "$plan_name" "$plan_work_dir"
+    log "[Step 7] Pushing branches and opening PRs..."
+    push_and_open_prs "$branch_name" "$plan_name" "$plan_file" "$plan_work_dir" "$reviews_successful" "$REVIEW_ITERATIONS"
   fi
 
+  # ── Step 8: Switch back to main ──
+  log "[Step 8] Switching all repos back to main..."
+  switch_all_to_main
+
+  # ── Step 9: Write done file ──
   log "========================================="
-  log "Plan '$plan_name' completed after review-fix loop."
+  log "Plan '$plan_name' completed."
   log "========================================="
 
   mkdir -p "$PLAN_DIR/done"
@@ -365,7 +467,7 @@ $claude_review"
     echo "## Execution Summary"
     echo ""
     echo "- **Completed:** $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "- **Review rounds:** $review_rounds_completed / $REVIEW_ITERATIONS"
+    echo "- **Review rounds:** $reviews_successful completed / $REVIEW_ITERATIONS total"
     echo "- **Repos changed:**"
     if [ -f "$plan_work_dir/commits.tsv" ]; then
       while IFS=$'\t' read -r repo_name hash; do
@@ -389,7 +491,7 @@ $claude_review"
       if [ -f "$plan_work_dir/combined_review_$r.txt" ]; then
         cat "$plan_work_dir/combined_review_$r.txt"
       else
-        echo "(no review data)"
+        echo "(skipped)"
       fi
       echo ""
     done
@@ -401,54 +503,7 @@ $claude_review"
   log "Wrote done file: $done_name"
 }
 
-execute_plan() {
-  local plan_file="$1"
-  local plan_name="$(basename "$plan_file")"
-
-  log "========================================="
-  log "Found plan: $plan_name"
-  log "========================================="
-
-  local plan_content
-  plan_content="$(cat "$plan_file")"
-
-  local work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
-  local plan_work_dir="$WORK_DIR/$work_id"
-  mkdir -p "$plan_work_dir"
-
-  # Create a branch name from the plan (e.g., owl/001-android-version)
-  local branch_name="owl/${plan_name%.md}"
-
-  log "[Step 1] Executing plan via Claude Code..."
-  cd "$PROJECT_DIR"
-
-  # Write plan to file to avoid argument list too long
-  local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
-  echo "$plan_content" > "$plan_prompt_file"
-
-  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$plan_prompt_file"
-  local exit_code=$?
-  local exec_output="$RETRY_OUTPUT"
-  echo "$exec_output" >> "$LOG_FILE"
-  echo "$exec_output" > "$plan_work_dir/execution.log"
-
-  # Treat empty output or error as failure
-  if [ $exit_code -ne 0 ] || [ -z "$exec_output" ] || echo "$exec_output" | grep -qi "^Execution error$"; then
-    log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
-    return 1
-  fi
-
-  log "Plan execution completed. Creating branch and committing..."
-  create_branches "$branch_name"
-  commit_all_repos "$plan_name — execution" "$plan_work_dir/review_input_1.tsv" "$plan_work_dir"
-
-  echo "$plan_file" > "$plan_work_dir/pending"
-  echo "$branch_name" > "$plan_work_dir/branch"
-
-  run_review_loop "$plan_file" "$plan_name" "$plan_work_dir"
-}
-
-# Fix #1: Explicit return values instead of $resumed command execution
+# ─── Resume pending reviews ───
 resume_pending_reviews() {
   local resumed=false
   for pending_file in "$WORK_DIR"/*/pending; do
@@ -471,6 +526,7 @@ resume_pending_reviews() {
   if $resumed; then return 0; else return 1; fi
 }
 
+# ─── Main check loop ───
 check_plans() {
   log "Checking for plans in $PLAN_DIR..."
 
@@ -494,7 +550,7 @@ check_plans() {
   fi
 }
 
-# --- Main ---
+# ─── Main ───
 acquire_lock
 
 log "Dev Agent started. Checking every 10 minutes."
