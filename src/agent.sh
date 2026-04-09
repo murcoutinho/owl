@@ -26,16 +26,53 @@ REVIEW_ITERATIONS=2
 RETRY_WAIT=600
 MAX_RETRIES=50
 
-# Models
-IMPL_MODEL="${OWL_IMPL_MODEL:-claude-sonnet-4-6}"       # Model for plan execution and fixes
-REVIEW_CLAUDE_MODEL="${OWL_REVIEW_CLAUDE_MODEL:-claude-sonnet-4-6}"  # Model for Claude reviewer
-REVIEW_CODEX_MODEL="${OWL_REVIEW_CODEX_MODEL:-gpt-5.4}"             # Model for Codex reviewer (passed via --model if set)
+# Providers / models
+IMPL_PROVIDER="${OWL_IMPL_PROVIDER:-claude}"            # claude | codex
+IMPL_MODEL="${OWL_IMPL_MODEL:-claude-sonnet-4-6}"
+FIX_PROVIDER="${OWL_FIX_PROVIDER:-$IMPL_PROVIDER}"      # claude | codex
+FIX_MODEL="${OWL_FIX_MODEL:-$IMPL_MODEL}"
+
+REVIEWER1_PROVIDER="${OWL_REVIEWER1_PROVIDER:-codex}"   # claude | codex | none
+REVIEWER1_MODEL="${OWL_REVIEWER1_MODEL:-gpt-5.4}"
+REVIEWER1_LABEL="${OWL_REVIEWER1_LABEL:-Codex}"
+
+REVIEWER2_PROVIDER="${OWL_REVIEWER2_PROVIDER:-claude}"  # claude | codex | none
+REVIEWER2_MODEL="${OWL_REVIEWER2_MODEL:-claude-sonnet-4-6}"
+REVIEWER2_LABEL="${OWL_REVIEWER2_LABEL:-Claude Code}"
 
 # Review mode: "parallel" or "sequential"
 REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+normalize_provider() {
+  echo "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+run_llm() {
+  local provider
+  provider="$(normalize_provider "$1")"
+  local model="$2"
+  local prompt_file="$3"
+
+  case "$provider" in
+    claude)
+      retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      ;;
+    codex)
+      retry_on_limit "Codex run" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      ;;
+    none)
+      RETRY_OUTPUT=""
+      return 0
+      ;;
+    *)
+      log "Invalid provider '$provider'. Expected claude, codex, or none."
+      return 1
+      ;;
+  esac
 }
 
 acquire_lock() {
@@ -230,8 +267,8 @@ execute_plan() {
     fi
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
-  # ── Step 3: Execute plan via Claude Code ──
-  log "[Step 3] Executing plan via Claude Code..."
+  # ── Step 3: Execute plan ──
+  log "[Step 3] Executing plan via $IMPL_PROVIDER ($IMPL_MODEL)..."
   cd "$PROJECT_DIR"
 
   local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
@@ -243,7 +280,7 @@ IMPORTANT INSTRUCTIONS:
 - The agent handles all git operations.
 PLANEOF
 
-  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$IMPL_MODEL" "$plan_prompt_file"
+  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file"
   local exit_code=$?
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
@@ -395,90 +432,118 @@ run_review_loop() {
     } > "$review_prompt_file"
 
     # Launch reviewers
-    local codex_review_file="$plan_work_dir/codex_review_$i.txt"
-    local claude_review_file="$plan_work_dir/claude_review_$i.txt"
-    local codex_ok=true claude_ok=true
+    local reviewer1_file="$plan_work_dir/reviewer1_$i.txt"
+    local reviewer2_file="$plan_work_dir/reviewer2_$i.txt"
+    local reviewer1_ok=true reviewer2_ok=true
+    local reviewer1_enabled=true reviewer2_enabled=true
+    [ "$(normalize_provider "$REVIEWER1_PROVIDER")" = "none" ] && reviewer1_enabled=false
+    [ "$(normalize_provider "$REVIEWER2_PROVIDER")" = "none" ] && reviewer2_enabled=false
 
     if [ "$REVIEW_MODE" = "parallel" ]; then
       log "Spawning reviewers in parallel..."
 
-      (
-        rc=0
-        retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
-        echo "$RETRY_OUTPUT"
-        exit $rc
-      ) > "$codex_review_file" 2>&1 &
-      local codex_pid=$!
+      local reviewer1_pid=""
+      local reviewer2_pid=""
 
-      (
-        rc=0
-        retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$REVIEW_CLAUDE_MODEL" "$review_prompt_file" || rc=$?
-        echo "$RETRY_OUTPUT"
-        exit $rc
-      ) > "$claude_review_file" 2>&1 &
-      local claude_pid=$!
+      if $reviewer1_enabled; then
+        (
+          rc=0
+          run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$review_prompt_file" || rc=$?
+          echo "$RETRY_OUTPUT"
+          exit $rc
+        ) > "$reviewer1_file" 2>&1 &
+        reviewer1_pid=$!
+      else
+        echo "LGTM" > "$reviewer1_file"
+      fi
 
-      wait $codex_pid || codex_ok=false
-      log "Codex review complete (success=$codex_ok)."
-      wait $claude_pid || claude_ok=false
-      log "Claude Code review complete (success=$claude_ok)."
+      if $reviewer2_enabled; then
+        (
+          rc=0
+          run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$review_prompt_file" || rc=$?
+          echo "$RETRY_OUTPUT"
+          exit $rc
+        ) > "$reviewer2_file" 2>&1 &
+        reviewer2_pid=$!
+      else
+        echo "LGTM" > "$reviewer2_file"
+      fi
+
+      if [ -n "$reviewer1_pid" ]; then
+        wait "$reviewer1_pid" || reviewer1_ok=false
+      fi
+      log "$REVIEWER1_LABEL review complete (enabled=$reviewer1_enabled success=$reviewer1_ok)."
+
+      if [ -n "$reviewer2_pid" ]; then
+        wait "$reviewer2_pid" || reviewer2_ok=false
+      fi
+      log "$REVIEWER2_LABEL review complete (enabled=$reviewer2_enabled success=$reviewer2_ok)."
 
     else
       log "Running reviewers sequentially..."
 
-      log "Running Codex reviewer..."
-      (
-        rc=0
-        retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
-        echo "$RETRY_OUTPUT"
-        exit $rc
-      ) > "$codex_review_file" 2>&1
-      [ $? -eq 0 ] || codex_ok=false
-      log "Codex review complete (success=$codex_ok)."
+      if $reviewer1_enabled; then
+        log "Running $REVIEWER1_LABEL reviewer..."
+        (
+          rc=0
+          run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$review_prompt_file" || rc=$?
+          echo "$RETRY_OUTPUT"
+          exit $rc
+        ) > "$reviewer1_file" 2>&1
+        [ $? -eq 0 ] || reviewer1_ok=false
+      else
+        echo "LGTM" > "$reviewer1_file"
+      fi
+      log "$REVIEWER1_LABEL review complete (enabled=$reviewer1_enabled success=$reviewer1_ok)."
 
-      log "Running Claude Code reviewer..."
-      (
-        rc=0
-        retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$REVIEW_CLAUDE_MODEL" "$review_prompt_file" || rc=$?
-        echo "$RETRY_OUTPUT"
-        exit $rc
-      ) > "$claude_review_file" 2>&1
-      [ $? -eq 0 ] || claude_ok=false
-      log "Claude Code review complete (success=$claude_ok)."
+      if $reviewer2_enabled; then
+        log "Running $REVIEWER2_LABEL reviewer..."
+        (
+          rc=0
+          run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$review_prompt_file" || rc=$?
+          echo "$RETRY_OUTPUT"
+          exit $rc
+        ) > "$reviewer2_file" 2>&1
+        [ $? -eq 0 ] || reviewer2_ok=false
+      else
+        echo "LGTM" > "$reviewer2_file"
+      fi
+      log "$REVIEWER2_LABEL review complete (enabled=$reviewer2_enabled success=$reviewer2_ok)."
     fi
 
-    if ! $codex_ok && ! $claude_ok; then
-      log "Both reviewers failed. Skipping fix phase for iteration $i."
+    if ! $reviewer1_ok && ! $reviewer2_ok; then
+      log "All enabled reviewers failed. Skipping fix phase for iteration $i."
       reviews_skipped=$((reviews_skipped + 1))
       continue
     fi
 
-    local codex_review=""
-    local claude_review=""
-    [ -f "$codex_review_file" ] && codex_review=$(cat "$codex_review_file")
-    [ -f "$claude_review_file" ] && claude_review=$(cat "$claude_review_file")
+    local reviewer1_review=""
+    local reviewer2_review=""
+    [ -f "$reviewer1_file" ] && reviewer1_review=$(cat "$reviewer1_file")
+    [ -f "$reviewer2_file" ] && reviewer2_review=$(cat "$reviewer2_file")
 
-    local combined_review="## Codex Review
+    local combined_review="## $REVIEWER1_LABEL Review
 
-$codex_review
+$reviewer1_review
 
-## Claude Code Review
+## $REVIEWER2_LABEL Review
 
-$claude_review"
+$reviewer2_review"
 
     echo "$combined_review" > "$plan_work_dir/combined_review_$i.txt"
     review_rounds_completed=$i
 
-    local codex_trimmed claude_trimmed
-    codex_trimmed=$(echo "$codex_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    claude_trimmed=$(echo "$claude_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local reviewer1_trimmed reviewer2_trimmed
+    reviewer1_trimmed=$(echo "$reviewer1_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    reviewer2_trimmed=$(echo "$reviewer2_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    if [ "$codex_trimmed" = "LGTM" ] && [ "$claude_trimmed" = "LGTM" ]; then
-      log "Both reviewers say LGTM. No fixes needed."
+    if { ! $reviewer1_enabled || [ "$reviewer1_trimmed" = "LGTM" ]; } && \
+       { ! $reviewer2_enabled || [ "$reviewer2_trimmed" = "LGTM" ]; }; then
+      log "All enabled reviewers say LGTM. No fixes needed."
       break
     fi
 
-    # ── Fix phase: Claude writes fixes, we commit ──
+    # ── Fix phase ──
     log "[Iteration $i/$REVIEW_ITERATIONS] Fix phase"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
@@ -492,8 +557,8 @@ IMPORTANT: Do NOT commit, push, or create branches. Just write the code fixes.
 $combined_review
 FIXEOF
 
-    log "Applying fixes via Claude Code..."
-    retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$IMPL_MODEL" "$fix_prompt_file"
+    log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
+    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file"
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
 
     # Commit fixes in repos on the branch that have changes
