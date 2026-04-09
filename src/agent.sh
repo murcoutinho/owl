@@ -242,7 +242,7 @@ execute_plan() {
 $plan_content
 
 IMPORTANT INSTRUCTIONS:
-- Commit your changes to the current branch when done.
+- Commit your changes to the current branch when done. Use prefix "[owl]" in commit messages.
 - Do NOT push to any remote. The agent handles pushing.
 - Do NOT create branches. Work on the current branch.
 PLANEOF
@@ -399,7 +399,7 @@ $claude_review"
     cat > "$fix_prompt_file" <<FIXEOF
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
-IMPORTANT: Commit your fixes to the current branch. Do NOT push.
+IMPORTANT: Commit your fixes to the current branch. Use prefix "[owl]" in commit messages. Do NOT push.
 
 ## Review Feedback
 
