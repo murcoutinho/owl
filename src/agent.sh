@@ -278,6 +278,12 @@ PLANEOF
       continue
     fi
 
+    # Skip repos that were already dirty before execution (not our changes)
+    if echo "$pre_dirty_repos" | grep -qw "$repo_name"; then
+      log "  $repo_name: SKIPPING — had pre-existing local changes"
+      continue
+    fi
+
     local main_hash="NONE"
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       main_hash=$(git -C "$repo_root" rev-parse HEAD)
