@@ -85,10 +85,11 @@ reset_all_repos_to_main() {
       continue
     fi
 
-    # Skip repos with uncommitted changes (protect user's work)
+    # Skip repos with any local changes — tracked, staged, or untracked (protect user's work)
     if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
-       ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
-      log "  $repo_name: SKIPPING — has uncommitted changes"
+       ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
+       [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+      log "  $repo_name: SKIPPING — has local changes"
       continue
     fi
 
@@ -139,8 +140,14 @@ push_and_open_prs() {
     fi
 
     log "Pushing branch '$branch_name' in $repo_name..."
-    git -C "$repo_root" checkout "$branch_name" 2>>"$LOG_FILE"
-    git -C "$repo_root" push -u origin "$branch_name" 2>>"$LOG_FILE"
+    if ! git -C "$repo_root" checkout "$branch_name" 2>>"$LOG_FILE"; then
+      log "  $repo_name: failed to checkout branch. Skipping PR."
+      continue
+    fi
+    if ! git -C "$repo_root" push -u origin "$branch_name" 2>>"$LOG_FILE"; then
+      log "  $repo_name: push failed. Skipping PR."
+      continue
+    fi
 
     log "Opening PR in $repo_name..."
     local pr_url
@@ -279,7 +286,12 @@ PLANEOF
     log "  $repo_name: changes detected → creating branch '$branch_name'"
 
     # Create and switch to branch
-    git -C "$repo_root" checkout -B "$branch_name" 2>>"$LOG_FILE"
+    # Create new branch; if it already exists, delete it first (stale from a prior failed run)
+    if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
+      log "  $repo_name: deleting stale branch '$branch_name'"
+      git -C "$repo_root" branch -D "$branch_name" 2>>"$LOG_FILE"
+    fi
+    git -C "$repo_root" checkout -b "$branch_name" 2>>"$LOG_FILE"
 
     # Stage and commit
     git -C "$repo_root" add -A 2>>"$LOG_FILE"
