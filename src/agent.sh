@@ -186,19 +186,6 @@ execute_plan() {
   # ── Step 2: Reset to main & pull ──
   reset_all_repos_to_main
 
-  # ── Step 2b: Record main HEAD in each repo before execution ──
-  local main_snapshot="$plan_work_dir/main_snapshot.tsv"
-  : > "$main_snapshot"
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
-    if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      local hash
-      hash=$(git -C "$repo_root" rev-parse HEAD)
-      printf '%s\t%s\t%s\n' "$repo_name" "$repo_root" "$hash" >> "$main_snapshot"
-    fi
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
-
   # ── Step 3: Execute plan via Claude Code ──
   log "[Step 3] Executing plan via Claude Code..."
   cd "$PROJECT_DIR"
@@ -208,9 +195,8 @@ execute_plan() {
 $plan_content
 
 IMPORTANT INSTRUCTIONS:
-- Commit your changes to the current branch when done. Use prefix "[owl]" in commit messages.
-- Do NOT push to any remote. The agent handles pushing.
-- Do NOT create branches. Work on the current branch.
+- Do NOT commit, push, or create branches. Just write the code changes.
+- The agent handles all git operations.
 PLANEOF
 
   retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$plan_prompt_file"
@@ -221,44 +207,56 @@ PLANEOF
 
   if [ $exit_code -ne 0 ] || [ -z "$exec_output" ] || echo "$exec_output" | grep -qi "^Execution error$"; then
     log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
-    switch_all_to_main
+    # Discard any partial changes
+    while IFS= read -r -d '' repo_dir; do
+      local repo_root="$(dirname "$repo_dir")"
+      git -C "$repo_root" checkout -- . 2>/dev/null
+      git -C "$repo_root" clean -fd 2>/dev/null
+    done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
     return 1
   fi
 
   log "Plan execution completed."
 
-  # ── Step 4: Move new commits from main to branch ──
-  log "[Step 4] Moving new commits to branch '$branch_name'..."
+  # ── Step 4: Find dirty repos, create branch, commit ──
+  log "[Step 4] Creating branch and committing changes..."
   : > "$plan_work_dir/review_input_1.tsv"
-  while IFS=$'\t' read -r repo_name repo_root pre_main_hash; do
-    local current_hash
-    current_hash=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)
+  while IFS= read -r -d '' repo_dir; do
+    local repo_root="$(dirname "$repo_dir")"
+    local repo_name="$(basename "$repo_root")"
 
-    # Skip if no new commits since snapshot
-    if [ "$current_hash" = "$pre_main_hash" ]; then
+    # Skip repos with no changes
+    if git -C "$repo_root" diff --quiet 2>/dev/null && \
+       git -C "$repo_root" diff --cached --quiet 2>/dev/null && \
+       [ -z "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
       continue
     fi
 
+    local main_hash="NONE"
+    if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+      main_hash=$(git -C "$repo_root" rev-parse HEAD)
+    fi
+
+    log "  $repo_name: changes detected → creating branch '$branch_name'"
+
+    # Create and switch to branch
+    git -C "$repo_root" checkout -b "$branch_name" 2>/dev/null
+
+    # Stage and commit
+    git -C "$repo_root" add -A 2>/dev/null
+    git -C "$repo_root" commit -m "[owl] ${plan_name%.md} — execution" 2>/dev/null
+
+    local after_hash
+    after_hash=$(git -C "$repo_root" rev-parse HEAD)
     local short_hash
     short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
-    local ahead
-    ahead=$(git -C "$repo_root" rev-list "$pre_main_hash"..HEAD --count 2>/dev/null || echo 0)
-    log "  $repo_name: $ahead new commit(s) ($short_hash) → moving to branch"
 
-    # Create branch at current HEAD (which has the new commits)
-    git -C "$repo_root" branch -f "$branch_name" HEAD 2>/dev/null
+    log "  $repo_name: committed ($short_hash)"
 
-    # Reset main back to pre-execution state
-    git -C "$repo_root" reset --hard "$pre_main_hash" 2>/dev/null
-
-    # Switch to the branch
-    git -C "$repo_root" checkout "$branch_name" 2>/dev/null
-
-    # Record for review manifest
-    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$pre_main_hash" "$current_hash" >> "$plan_work_dir/review_input_1.tsv"
+    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$main_hash" "$after_hash" >> "$plan_work_dir/review_input_1.tsv"
     printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
 
-  done < "$main_snapshot"
+  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
   # ── Step 5: Mark pending ──
   echo "$plan_file" > "$plan_work_dir/pending"
@@ -383,14 +381,14 @@ $claude_review"
       break
     fi
 
-    # ── Fix phase: same pattern — Claude commits, no push ──
+    # ── Fix phase: Claude writes fixes, we commit ──
     log "[Iteration $i/$REVIEW_ITERATIONS] Fix phase"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
     cat > "$fix_prompt_file" <<FIXEOF
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
-IMPORTANT: Commit your fixes to the current branch. Use prefix "[owl]" in commit messages. Do NOT push.
+IMPORTANT: Do NOT commit, push, or create branches. Just write the code fixes.
 
 ## Review Feedback
 
@@ -401,29 +399,39 @@ FIXEOF
     retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$fix_prompt_file"
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
 
-    # Record fix commits for next review round manifest
+    # Commit fixes in repos on the branch that have changes
     local next_manifest="$plan_work_dir/review_input_$((i + 1)).tsv"
     : > "$next_manifest"
     while IFS= read -r -d '' repo_dir; do
       local repo_root="$(dirname "$repo_dir")"
       local repo_name="$(basename "$repo_root")"
-      if [ -n "$branch_name" ] && git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
-        local current_branch
-        current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
-        if [ "$current_branch" = "$branch_name" ]; then
-          # Check if there are new commits after the last known
-          local prev_head
-          prev_head=$(tail -1 "$plan_work_dir/review_input_$i.tsv" 2>/dev/null | cut -f4)
-          local cur_head
-          cur_head=$(git -C "$repo_root" rev-parse HEAD)
-          if [ "$prev_head" != "$cur_head" ]; then
-            local short_hash
-            short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
-            printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "${prev_head:-NONE}" "$cur_head" >> "$next_manifest"
-            printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
-          fi
-        fi
+      local current_branch
+      current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
+
+      # Only commit in repos on the plan's branch with changes
+      if [ "$current_branch" != "$branch_name" ]; then
+        continue
       fi
+      if git -C "$repo_root" diff --quiet 2>/dev/null && \
+         git -C "$repo_root" diff --cached --quiet 2>/dev/null && \
+         [ -z "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+        continue
+      fi
+
+      local before_hash
+      before_hash=$(git -C "$repo_root" rev-parse HEAD)
+
+      git -C "$repo_root" add -A 2>/dev/null
+      git -C "$repo_root" commit -m "[owl] ${plan_name%.md} — review fix iteration $i" 2>/dev/null
+
+      local after_hash
+      after_hash=$(git -C "$repo_root" rev-parse HEAD)
+      local short_hash
+      short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
+
+      log "  $repo_name: fix committed ($short_hash)"
+      printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$before_hash" "$after_hash" >> "$next_manifest"
+      printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
     done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
     review_rounds_completed=$i
