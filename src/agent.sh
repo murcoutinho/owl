@@ -442,14 +442,19 @@ execute_plan() {
   log "[Step 1] Executing plan via Claude Code..."
   cd "$PROJECT_DIR"
 
-  retry_on_limit "Plan execution" claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 "$plan_content"
+  # Write plan to file to avoid argument list too long
+  local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
+  echo "$plan_content" > "$plan_prompt_file"
+
+  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$plan_prompt_file"
   local exit_code=$?
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
   echo "$exec_output" > "$plan_work_dir/execution.log"
 
-  if [ $exit_code -ne 0 ]; then
-    log "Plan execution failed with exit code $exit_code. Will retry next cycle."
+  # Treat empty output or error as failure
+  if [ $exit_code -ne 0 ] || [ -z "$exec_output" ] || echo "$exec_output" | grep -qi "^Execution error$"; then
+    log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
     return 1
   fi
 
