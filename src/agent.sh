@@ -199,29 +199,6 @@ commit_all_repos() {
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 }
 
-build_diff_from_manifest() {
-  local manifest="$1"
-  local diff=""
-
-  [ -f "$manifest" ] || return 0
-
-  while IFS=$'\t' read -r repo_name repo_root base head; do
-    local repo_diff=""
-    if [ "$base" != "NONE" ] && [ -n "$base" ]; then
-      repo_diff="$(git -C "$repo_root" diff "$base" "$head" 2>/dev/null)"
-    else
-      repo_diff="$(git -C "$repo_root" show --format= "$head" 2>/dev/null)"
-    fi
-
-    if [ -n "$repo_diff" ]; then
-      diff="${diff}
-## Repo: ${repo_name}
-${repo_diff}"
-    fi
-  done < "$manifest"
-
-  echo "$diff"
-}
 
 run_review_loop() {
   local plan_file="$1"
@@ -273,23 +250,27 @@ run_review_loop() {
     log "-----------------------------------------"
 
     local manifest="$plan_work_dir/review_input_$i.tsv"
-    local diff
-    diff="$(build_diff_from_manifest "$manifest")"
 
-    if [ -z "$diff" ]; then
-      log "No diff found to review (missing or empty manifest for round $i). Skipping this round."
+    if [ ! -s "$manifest" ]; then
+      log "No manifest for round $i. Skipping this round."
       continue
     fi
 
-    # Write review prompt to file to avoid "Argument list too long" for large diffs
+    # Build review instructions with repo paths and commit ranges (LLM reads the diff itself)
     local review_prompt_file="$plan_work_dir/review_prompt_$i.txt"
-    cat > "$review_prompt_file" <<REVIEWEOF
-You are a code reviewer. Review the following git diff for bugs, security issues, code quality problems, and correctness. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM
-
-\`\`\`diff
-$diff
-\`\`\`
-REVIEWEOF
+    {
+      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
+      echo ""
+      echo "Use git diff to inspect the changes. Here are the repos and commit ranges to review:"
+      echo ""
+      while IFS=$'\t' read -r repo_name repo_root base head; do
+        if [ "$base" != "NONE" ] && [ -n "$base" ]; then
+          echo "- Repo: $repo_name (path: $repo_root) — run: git -C $repo_root diff $base $head"
+        else
+          echo "- Repo: $repo_name (path: $repo_root) — run: git -C $repo_root show $head"
+        fi
+      done < "$manifest"
+    } > "$review_prompt_file"
 
     # Fix #3: Propagate reviewer exit code from subshell
     log "Spawning Codex reviewer..."
