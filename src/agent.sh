@@ -186,14 +186,16 @@ execute_plan() {
   # ── Step 2: Reset to main & pull ──
   reset_all_repos_to_main
 
-  # ── Step 2b: Create branch in all repos BEFORE execution ──
-  log "[Step 2b] Creating branch '$branch_name' in all repos..."
+  # ── Step 2b: Record main HEAD in each repo before execution ──
+  local main_snapshot="$plan_work_dir/main_snapshot.tsv"
+  : > "$main_snapshot"
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
     local repo_name="$(basename "$repo_root")"
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      git -C "$repo_root" checkout -b "$branch_name" 2>/dev/null || \
-        git -C "$repo_root" checkout "$branch_name" 2>/dev/null
+      local hash
+      hash=$(git -C "$repo_root" rev-parse HEAD)
+      printf '%s\t%s\t%s\n' "$repo_name" "$repo_root" "$hash" >> "$main_snapshot"
     fi
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
@@ -225,29 +227,38 @@ PLANEOF
 
   log "Plan execution completed."
 
-  # ── Step 4: Record commits on the branch for review ──
-  log "[Step 4] Recording commits for review..."
+  # ── Step 4: Move new commits from main to branch ──
+  log "[Step 4] Moving new commits to branch '$branch_name'..."
   : > "$plan_work_dir/review_input_1.tsv"
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
-    if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+  while IFS=$'\t' read -r repo_name repo_root pre_main_hash; do
+    local current_hash
+    current_hash=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)
+
+    # Skip if no new commits since snapshot
+    if [ "$current_hash" = "$pre_main_hash" ]; then
       continue
     fi
+
+    local short_hash
+    short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
     local ahead
-    ahead=$(git -C "$repo_root" rev-list main..HEAD --count 2>/dev/null || echo 0)
-    if [ "$ahead" -gt 0 ]; then
-      local main_hash
-      main_hash=$(git -C "$repo_root" rev-parse main)
-      local head_hash
-      head_hash=$(git -C "$repo_root" rev-parse HEAD)
-      local short_hash
-      short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
-      printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$main_hash" "$head_hash" >> "$plan_work_dir/review_input_1.tsv"
-      printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
-      log "  $repo_name: $ahead commit(s) ahead of main ($short_hash)"
-    fi
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+    ahead=$(git -C "$repo_root" rev-list "$pre_main_hash"..HEAD --count 2>/dev/null || echo 0)
+    log "  $repo_name: $ahead new commit(s) ($short_hash) → moving to branch"
+
+    # Create branch at current HEAD (which has the new commits)
+    git -C "$repo_root" branch -f "$branch_name" HEAD 2>/dev/null
+
+    # Reset main back to pre-execution state
+    git -C "$repo_root" reset --hard "$pre_main_hash" 2>/dev/null
+
+    # Switch to the branch
+    git -C "$repo_root" checkout "$branch_name" 2>/dev/null
+
+    # Record for review manifest
+    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$pre_main_hash" "$current_hash" >> "$plan_work_dir/review_input_1.tsv"
+    printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
+
+  done < "$main_snapshot"
 
   # ── Step 5: Mark pending ──
   echo "$plan_file" > "$plan_work_dir/pending"
