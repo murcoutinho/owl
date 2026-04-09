@@ -25,6 +25,7 @@ LOCK_FILE="$SCRIPT_DIR/../.agent.lock"
 REVIEW_ITERATIONS=2
 RETRY_WAIT=600
 MAX_RETRIES=50
+POLL_INTERVAL_SECONDS="${OWL_POLL_INTERVAL_SECONDS:-600}"
 
 # Providers / models
 IMPL_PROVIDER="${OWL_IMPL_PROVIDER:-claude}"            # claude | codex
@@ -45,6 +46,18 @@ REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+format_poll_interval() {
+  local seconds="$1"
+  if [ "$seconds" -eq 60 ]; then
+    echo "1 minute"
+  elif [ $((seconds % 60)) -eq 0 ]; then
+    local minutes=$((seconds / 60))
+    echo "$minutes minutes"
+  else
+    echo "$seconds seconds"
+  fi
 }
 
 normalize_provider() {
@@ -266,6 +279,16 @@ execute_plan() {
       echo "$repo_root" >> "$pre_dirty_file"
     fi
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+
+  if [ -s "$pre_dirty_file" ]; then
+    log "Plan execution aborted before $IMPL_PROVIDER: repos have pre-existing local changes."
+    while IFS= read -r repo_root; do
+      [ -n "$repo_root" ] || continue
+      log "  dirty repo: $(basename "$repo_root") ($repo_root)"
+    done < "$pre_dirty_file"
+    log "Clean or commit those repos first, then retry the plan."
+    return 1
+  fi
 
   # ── Step 3: Execute plan ──
   log "[Step 3] Executing plan via $IMPL_PROVIDER ($IMPL_MODEL)..."
@@ -714,13 +737,13 @@ check_plans() {
 # ─── Main ───
 acquire_lock
 
-log "Dev Agent started. Checking every 10 minutes."
+log "Dev Agent started. Checking every $(format_poll_interval "$POLL_INTERVAL_SECONDS")."
 log "Plan directory: $PLAN_DIR"
 log "Project directory: $PROJECT_DIR"
 log "Review iterations: $REVIEW_ITERATIONS"
 
 while true; do
   check_plans
-  log "Sleeping 10 minutes..."
-  sleep 600
+  log "Sleeping $(format_poll_interval "$POLL_INTERVAL_SECONDS")..."
+  sleep "$POLL_INTERVAL_SECONDS"
 done
