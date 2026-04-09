@@ -1,5 +1,9 @@
 # Owl
 
+<p align="center">
+  <img src="owl.png" width="400" alt="Owl — autonomous dev agent" />
+</p>
+
 An autonomous dev agent that executes plans using Claude Code and Codex, with built-in review cycles.
 
 ## How It Works
