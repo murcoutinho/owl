@@ -211,14 +211,14 @@ execute_plan() {
   reset_all_repos_to_main
 
   # ── Snapshot which repos are already dirty (not ours to clean) ──
-  local pre_dirty_repos=""
+  local pre_dirty_file="$plan_work_dir/pre_dirty_repos.txt"
+  : > "$pre_dirty_file"
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
     if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
        ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
        [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-      pre_dirty_repos="${pre_dirty_repos} ${repo_name}"
+      echo "$repo_root" >> "$pre_dirty_file"
     fi
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
@@ -248,7 +248,7 @@ PLANEOF
       local repo_root="$(dirname "$repo_dir")"
       local repo_name="$(basename "$repo_root")"
       # Skip repos that were already dirty before execution
-      if echo "$pre_dirty_repos" | grep -qw "$repo_name"; then
+      if grep -qxF "$repo_root" "$pre_dirty_file" 2>/dev/null; then
         continue
       fi
       if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
