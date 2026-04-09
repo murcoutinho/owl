@@ -63,16 +63,21 @@ retry_on_limit() {
 
 apply_fixes() {
   local review_feedback="$1"
-  local fix_prompt="You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
+  local fix_prompt_file
+  fix_prompt_file=$(mktemp)
+  cat > "$fix_prompt_file" <<FIXEOF
+You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
 ## Review Feedback
 
-$review_feedback"
+$review_feedback
+FIXEOF
 
   log "Applying fixes via Claude Code..."
-  retry_on_limit "Apply fixes" claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 "$fix_prompt"
+  retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$fix_prompt_file"
   local rc=$?
   echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE"
+  rm -f "$fix_prompt_file"
   return $rc
 }
 
@@ -276,18 +281,22 @@ run_review_loop() {
       continue
     fi
 
-    local review_prompt_text="You are a code reviewer. Review the following git diff for bugs, security issues, code quality problems, and correctness. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM
+    # Write review prompt to file to avoid "Argument list too long" for large diffs
+    local review_prompt_file="$plan_work_dir/review_prompt_$i.txt"
+    cat > "$review_prompt_file" <<REVIEWEOF
+You are a code reviewer. Review the following git diff for bugs, security issues, code quality problems, and correctness. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM
 
 \`\`\`diff
 $diff
-\`\`\`"
+\`\`\`
+REVIEWEOF
 
     # Fix #3: Propagate reviewer exit code from subshell
     log "Spawning Codex reviewer..."
     local codex_review_file="$plan_work_dir/codex_review_$i.txt"
     (
       rc=0
-      retry_on_limit "Codex review" codex exec --full-auto --skip-git-repo-check "$review_prompt_text" || rc=$?
+      retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
       echo "$RETRY_OUTPUT"
       exit $rc
     ) > "$codex_review_file" 2>&1 &
@@ -297,7 +306,7 @@ $diff
     local claude_review_file="$plan_work_dir/claude_review_$i.txt"
     (
       rc=0
-      retry_on_limit "Claude review" claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 "$review_prompt_text" || rc=$?
+      retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model claude-sonnet-4-6 - < "$1"' _ "$review_prompt_file" || rc=$?
       echo "$RETRY_OUTPUT"
       exit $rc
     ) > "$claude_review_file" 2>&1 &
