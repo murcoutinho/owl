@@ -1,0 +1,13 @@
+# Plans (project-specific, not part of the tool)
+plan/
+!plan/.gitkeep
+
+# Work directories and logs
+.work/
+agent.log
+
+# Lock file
+.agent.lock
+
+# OS
+.DS_Store
