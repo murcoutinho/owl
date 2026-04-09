@@ -5,10 +5,10 @@
 # Flow per plan:
 # 1. Find next plan
 # 2. Reset all repos to main & pull
-# 3. Execute plan via Codex (told to write code but NOT commit/push)
-# 4. Create branch and commit changes in dirty repos
+# 3. Execute plan via Claude Code (told to commit but NOT push)
+# 4. Create branch in repos that are ahead of main, move commits there
 # 5. Mark pending review
-# 6. Review loop: Codex reviews, Codex fixes (commits, no push)
+# 6. Review loop: reviewer LLMs check, Claude Code fixes (commits, no push)
 # 7. Push branch, open PRs
 # 8. Switch all repos back to main
 # 9. Write done file
@@ -27,8 +27,12 @@ RETRY_WAIT=600
 MAX_RETRIES=50
 
 # Models
-IMPL_MODEL="${OWL_IMPL_MODEL:-gpt-5.4}"          # Model for plan execution and fixes
-REVIEW_CODEX_MODEL="${OWL_REVIEW_CODEX_MODEL:-gpt-5.4}"  # Model for Codex reviewer
+IMPL_MODEL="${OWL_IMPL_MODEL:-claude-sonnet-4-6}"       # Model for plan execution and fixes
+REVIEW_CLAUDE_MODEL="${OWL_REVIEW_CLAUDE_MODEL:-claude-sonnet-4-6}"  # Model for Claude reviewer
+REVIEW_CODEX_MODEL="${OWL_REVIEW_CODEX_MODEL:-gpt-5.4}"             # Model for Codex reviewer (passed via --model if set)
+
+# Review mode: "parallel" or "sequential"
+REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
@@ -226,8 +230,8 @@ execute_plan() {
     fi
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
 
-  # ── Step 3: Execute plan via Codex ──
-  log "[Step 3] Executing plan via Codex..."
+  # ── Step 3: Execute plan via Claude Code ──
+  log "[Step 3] Executing plan via Claude Code..."
   cd "$PROJECT_DIR"
 
   local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
@@ -239,7 +243,7 @@ IMPORTANT INSTRUCTIONS:
 - The agent handles all git operations.
 PLANEOF
 
-  retry_on_limit "Plan execution" bash -c 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --model "$1" - < "$2"' _ "$IMPL_MODEL" "$plan_prompt_file"
+  retry_on_limit "Plan execution" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$IMPL_MODEL" "$plan_prompt_file"
   local exit_code=$?
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
@@ -390,45 +394,91 @@ run_review_loop() {
       done < "$manifest"
     } > "$review_prompt_file"
 
-    # Launch reviewer
+    # Launch reviewers
     local codex_review_file="$plan_work_dir/codex_review_$i.txt"
-    local codex_ok=true
+    local claude_review_file="$plan_work_dir/claude_review_$i.txt"
+    local codex_ok=true claude_ok=true
 
-    log "Running Codex reviewer..."
-    (
-      rc=0
-      retry_on_limit "Codex review" bash -c 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --model "$1" - < "$2"' _ "$REVIEW_CODEX_MODEL" "$review_prompt_file" || rc=$?
-      echo "$RETRY_OUTPUT"
-      exit $rc
-    ) > "$codex_review_file" 2>&1
-    [ $? -eq 0 ] || codex_ok=false
-    log "Codex review complete (success=$codex_ok)."
+    if [ "$REVIEW_MODE" = "parallel" ]; then
+      log "Spawning reviewers in parallel..."
 
-    if ! $codex_ok; then
-      log "Reviewer failed. Skipping fix phase for iteration $i."
+      (
+        rc=0
+        retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$codex_review_file" 2>&1 &
+      local codex_pid=$!
+
+      (
+        rc=0
+        retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$REVIEW_CLAUDE_MODEL" "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$claude_review_file" 2>&1 &
+      local claude_pid=$!
+
+      wait $codex_pid || codex_ok=false
+      log "Codex review complete (success=$codex_ok)."
+      wait $claude_pid || claude_ok=false
+      log "Claude Code review complete (success=$claude_ok)."
+
+    else
+      log "Running reviewers sequentially..."
+
+      log "Running Codex reviewer..."
+      (
+        rc=0
+        retry_on_limit "Codex review" bash -c 'codex exec --full-auto --skip-git-repo-check - < "$1"' _ "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$codex_review_file" 2>&1
+      [ $? -eq 0 ] || codex_ok=false
+      log "Codex review complete (success=$codex_ok)."
+
+      log "Running Claude Code reviewer..."
+      (
+        rc=0
+        retry_on_limit "Claude review" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$REVIEW_CLAUDE_MODEL" "$review_prompt_file" || rc=$?
+        echo "$RETRY_OUTPUT"
+        exit $rc
+      ) > "$claude_review_file" 2>&1
+      [ $? -eq 0 ] || claude_ok=false
+      log "Claude Code review complete (success=$claude_ok)."
+    fi
+
+    if ! $codex_ok && ! $claude_ok; then
+      log "Both reviewers failed. Skipping fix phase for iteration $i."
       reviews_skipped=$((reviews_skipped + 1))
       continue
     fi
 
     local codex_review=""
+    local claude_review=""
     [ -f "$codex_review_file" ] && codex_review=$(cat "$codex_review_file")
+    [ -f "$claude_review_file" ] && claude_review=$(cat "$claude_review_file")
 
     local combined_review="## Codex Review
 
-$codex_review"
+$codex_review
+
+## Claude Code Review
+
+$claude_review"
 
     echo "$combined_review" > "$plan_work_dir/combined_review_$i.txt"
     review_rounds_completed=$i
 
-    local codex_trimmed
+    local codex_trimmed claude_trimmed
     codex_trimmed=$(echo "$codex_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    claude_trimmed=$(echo "$claude_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    if [ "$codex_trimmed" = "LGTM" ]; then
-      log "Reviewer says LGTM. No fixes needed."
+    if [ "$codex_trimmed" = "LGTM" ] && [ "$claude_trimmed" = "LGTM" ]; then
+      log "Both reviewers say LGTM. No fixes needed."
       break
     fi
 
-    # ── Fix phase: Codex writes fixes, we commit ──
+    # ── Fix phase: Claude writes fixes, we commit ──
     log "[Iteration $i/$REVIEW_ITERATIONS] Fix phase"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
@@ -442,8 +492,8 @@ IMPORTANT: Do NOT commit, push, or create branches. Just write the code fixes.
 $combined_review
 FIXEOF
 
-    log "Applying fixes via Codex..."
-    retry_on_limit "Apply fixes" bash -c 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --model "$1" - < "$2"' _ "$IMPL_MODEL" "$fix_prompt_file"
+    log "Applying fixes via Claude Code..."
+    retry_on_limit "Apply fixes" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$IMPL_MODEL" "$fix_prompt_file"
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
 
     # Commit fixes in repos on the branch that have changes
