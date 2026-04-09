@@ -207,11 +207,17 @@ PLANEOF
 
   if [ $exit_code -ne 0 ] || [ -z "$exec_output" ] || echo "$exec_output" | grep -qi "^Execution error$"; then
     log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
-    # Discard any partial changes
+    # Discard partial changes only in repos that are dirty
     while IFS= read -r -d '' repo_dir; do
       local repo_root="$(dirname "$repo_dir")"
-      git -C "$repo_root" checkout -- . 2>/dev/null
-      git -C "$repo_root" clean -fd 2>/dev/null
+      local repo_name="$(basename "$repo_root")"
+      if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
+         ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
+         [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+        log "  Discarding partial changes in $repo_name"
+        git -C "$repo_root" checkout -- . 2>/dev/null
+        git -C "$repo_root" clean -fd 2>/dev/null
+      fi
     done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
     return 1
   fi
@@ -257,6 +263,12 @@ PLANEOF
     printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
 
   done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+
+  # ── Check that something was actually committed ──
+  if [ ! -s "$plan_work_dir/review_input_1.tsv" ]; then
+    log "Plan produced no changes in any repo. Failing — will retry next cycle."
+    return 1
+  fi
 
   # ── Step 5: Mark pending ──
   echo "$plan_file" > "$plan_work_dir/pending"
