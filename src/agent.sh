@@ -439,7 +439,7 @@ FIXEOF
   done
 
   # ── Step 7: Push and open PRs ──
-  local reviews_successful=$((review_rounds_completed - reviews_skipped))
+  local reviews_successful=$(( review_rounds_completed > reviews_skipped ? review_rounds_completed - reviews_skipped : 0 ))
   if [ -n "$branch_name" ]; then
     log "[Step 7] Pushing branches and opening PRs..."
     push_and_open_prs "$branch_name" "$plan_name" "$plan_file" "$plan_work_dir" "$reviews_successful" "$REVIEW_ITERATIONS"
