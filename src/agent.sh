@@ -171,7 +171,7 @@ commit_all_repos() {
       continue
     fi
 
-    local before=""
+    local before="NONE"
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       before="$(git -C "$repo_root" rev-parse HEAD)"
     fi
@@ -202,7 +202,7 @@ build_diff_from_manifest() {
 
   while IFS=$'\t' read -r repo_name repo_root base head; do
     local repo_diff=""
-    if [ -n "$base" ]; then
+    if [ "$base" != "NONE" ] && [ -n "$base" ]; then
       repo_diff="$(git -C "$repo_root" diff "$base" "$head" 2>/dev/null)"
     else
       repo_diff="$(git -C "$repo_root" show --format= "$head" 2>/dev/null)"
