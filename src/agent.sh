@@ -279,7 +279,7 @@ PLANEOF
     fi
 
     # Skip repos that were already dirty before execution (not our changes)
-    if echo "$pre_dirty_repos" | grep -qw "$repo_name"; then
+    if grep -qxF "$repo_root" "$pre_dirty_file" 2>/dev/null; then
       log "  $repo_name: SKIPPING — had pre-existing local changes"
       continue
     fi
