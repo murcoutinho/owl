@@ -116,6 +116,26 @@ parse_plan_review_rounds() {
   fi
 }
 
+# Parse `base-branch:` from plan frontmatter. Prints the literal branch name,
+# or an empty string if missing/blank. Lets a plan declare a dependency on
+# another plan's branch so it can be executed before that plan is merged.
+parse_plan_base_branch() {
+  local plan_file="$1"
+  awk '
+    NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; next }
+    in_fm && /^---[[:space:]]*$/ { exit }
+    in_fm && /^[[:space:]]*base[-_]branch[[:space:]]*:/ {
+      sub(/^[[:space:]]*base[-_]branch[[:space:]]*:[[:space:]]*/, "")
+      # trim trailing whitespace first so the closing quote (if any) lands at end-of-string
+      sub(/[[:space:]]+$/, "")
+      # then strip surrounding quotes if present
+      gsub(/^["'"'"']|["'"'"']$/, "")
+      print
+      exit
+    }
+  ' "$plan_file"
+}
+
 run_llm() {
   local provider
   provider="$(normalize_provider "$1")"
@@ -183,9 +203,20 @@ retry_on_limit() {
   done
 }
 
-# ─── Step 2: Reset all repos to main & pull ───
-reset_all_repos_to_main() {
-  log "Resetting all repos to main and pulling..."
+# ─── Step 2: Reset all repos to the base branch & pull ───
+# If base_branch is empty, resets to main (default). Otherwise, for each repo:
+#   - if origin has base_branch, fetch and check it out
+#   - if origin does not have base_branch, fall back to main for that repo
+#     (the dependency is considered satisfied — most likely the base plan was
+#     already merged and its branch deleted)
+reset_all_repos_to_base() {
+  local base_branch="$1"
+  if [ -z "$base_branch" ]; then
+    log "Resetting all repos to main and pulling..."
+  else
+    log "Resetting all repos to base branch '$base_branch' (fallback: main) and pulling..."
+  fi
+
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
     local repo_name="$(basename "$repo_root")"
@@ -203,19 +234,40 @@ reset_all_repos_to_main() {
       continue
     fi
 
+    # Decide which branch this repo should land on. Start from the requested
+    # base; if origin does not have it, fall back to main for this repo.
+    local target_branch="main"
+    if [ -n "$base_branch" ]; then
+      git -C "$repo_root" fetch origin "$base_branch" 2>/dev/null
+      if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
+        target_branch="$base_branch"
+        log "  $repo_name: using base branch '$base_branch' from origin"
+      else
+        log "  $repo_name: base branch '$base_branch' not on origin — falling back to main"
+      fi
+    fi
+
     local current_branch
     current_branch=$(git -C "$repo_root" branch --show-current 2>>"$LOG_FILE")
 
-    if [ "$current_branch" != "main" ]; then
-      log "  $repo_name: switching from '$current_branch' to main"
-      git -C "$repo_root" checkout main 2>>"$LOG_FILE" || {
-        log "  $repo_name: WARNING — failed to checkout main"
-        continue
-      }
+    if [ "$current_branch" != "$target_branch" ]; then
+      log "  $repo_name: switching from '$current_branch' to '$target_branch'"
+      # For a remote-only branch, create a local tracking branch on checkout.
+      if git -C "$repo_root" rev-parse --verify "$target_branch" >/dev/null 2>&1; then
+        git -C "$repo_root" checkout "$target_branch" 2>>"$LOG_FILE" || {
+          log "  $repo_name: WARNING — failed to checkout '$target_branch'"
+          continue
+        }
+      else
+        git -C "$repo_root" checkout -b "$target_branch" --track "origin/$target_branch" 2>>"$LOG_FILE" || {
+          log "  $repo_name: WARNING — failed to check out tracking branch for '$target_branch'"
+          continue
+        }
+      fi
     fi
 
     # Pull latest (non-destructive, fast-forward only)
-    git -C "$repo_root" pull --ff-only origin main 2>>"$LOG_FILE" || \
+    git -C "$repo_root" pull --ff-only origin "$target_branch" 2>>"$LOG_FILE" || \
       log "  $repo_name: pull --ff-only failed (may need manual merge)"
 
   done < <(find_target_repos)
@@ -234,6 +286,13 @@ push_and_open_prs() {
   local plan_content
   plan_content=$(strip_plan_frontmatter "$plan_file")
 
+  # Recover the plan's base branch (if any). Persisted by execute_plan so
+  # resume paths pick it up without re-parsing the plan file.
+  local pr_base_branch=""
+  if [ -f "$plan_work_dir/base_branch" ]; then
+    pr_base_branch="$(cat "$plan_work_dir/base_branch" 2>/dev/null)"
+  fi
+
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
     local repo_name="$(basename "$repo_root")"
@@ -243,13 +302,23 @@ push_and_open_prs() {
       continue
     fi
 
-    # Skip if no commits on branch beyond main
-    if [ -z "$(git -C "$repo_root" log main.."$branch_name" --oneline 2>/dev/null)" ]; then
+    # Determine the PR base for this repo. Default to main; if the plan
+    # declared a base branch AND origin has it, target that instead.
+    local repo_pr_base="main"
+    if [ -n "$pr_base_branch" ]; then
+      git -C "$repo_root" fetch origin "$pr_base_branch" 2>/dev/null
+      if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$pr_base_branch" >/dev/null 2>&1; then
+        repo_pr_base="$pr_base_branch"
+      fi
+    fi
+
+    # Skip if no commits on branch beyond the PR base
+    if [ -z "$(git -C "$repo_root" log "origin/${repo_pr_base}..${branch_name}" --oneline 2>/dev/null)" ]; then
       git -C "$repo_root" branch -d "$branch_name" 2>/dev/null || true
       continue
     fi
 
-    log "Pushing branch '$branch_name' in $repo_name..."
+    log "Pushing branch '$branch_name' in $repo_name (PR base: $repo_pr_base)..."
     if ! git -C "$repo_root" checkout "$branch_name" 2>>"$LOG_FILE"; then
       log "  $repo_name: failed to checkout branch. Skipping PR."
       continue
@@ -262,6 +331,7 @@ push_and_open_prs() {
     log "Opening PR in $repo_name..."
     local pr_url
     pr_url=$(cd "$repo_root" && gh pr create \
+      --base "$repo_pr_base" \
       --title "[owl] ${plan_name%.md}" \
       --body "$(cat <<EOF
 ## ${plan_name%.md}
@@ -315,15 +385,26 @@ execute_plan() {
   plan_review_iterations="$(parse_plan_review_rounds "$plan_file")"
   log "Review rounds for this plan: $plan_review_iterations (max $MAX_REVIEW_ROUNDS)"
 
+  local plan_base_branch
+  plan_base_branch="$(parse_plan_base_branch "$plan_file")"
+  if [ -n "$plan_base_branch" ]; then
+    log "Base branch for this plan: $plan_base_branch"
+  fi
+
   local work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
   local plan_work_dir="$WORK_DIR/$work_id"
   mkdir -p "$plan_work_dir"
   echo "$plan_review_iterations" > "$plan_work_dir/review_iterations"
+  # Persist the base branch so resume paths (run_review_loop, push_and_open_prs)
+  # can recover it without re-parsing the plan file.
+  if [ -n "$plan_base_branch" ]; then
+    echo "$plan_base_branch" > "$plan_work_dir/base_branch"
+  fi
 
   local branch_name="owl/${plan_name%.md}"
 
-  # ── Step 2: Reset to main & pull ──
-  reset_all_repos_to_main
+  # ── Step 2: Reset to base branch (or main) & pull ──
+  reset_all_repos_to_base "$plan_base_branch"
 
   # ── Snapshot which repos are already dirty (not ours to clean) ──
   local pre_dirty_file="$plan_work_dir/pre_dirty_repos.txt"
@@ -409,9 +490,12 @@ PLANEOF
       continue
     fi
 
-    local main_hash="NONE"
+    # Capture the base commit (whatever was checked out before this plan ran —
+    # either main or the plan's declared base_branch). The reviewer uses this
+    # as the left side of the diff range.
+    local base_hash="NONE"
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      main_hash=$(git -C "$repo_root" rev-parse HEAD)
+      base_hash=$(git -C "$repo_root" rev-parse HEAD)
     fi
 
     log "  $repo_name: changes detected → creating branch '$branch_name'"
@@ -435,7 +519,7 @@ PLANEOF
 
     log "  $repo_name: committed ($short_hash)"
 
-    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$main_hash" "$after_hash" >> "$plan_work_dir/review_input_1.tsv"
+    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$base_hash" "$after_hash" >> "$plan_work_dir/review_input_1.tsv"
     printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
 
   done < <(find_target_repos)
