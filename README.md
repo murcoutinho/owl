@@ -46,6 +46,7 @@ Plans can declare configuration via YAML frontmatter. All fields are optional.
 ```markdown
 ---
 review-rounds: 3
+priority: low
 base-branch: owl/019-earlier-dependency
 ---
 
@@ -56,6 +57,14 @@ base-branch: owl/019-earlier-dependency
 **`review-rounds`** — override the default number of review-fix cycles.
 Values are clamped to `[1, 3]`; anything missing or invalid falls back to the
 `REVIEW_ITERATIONS` default.
+
+**`priority`** — set to `low` to mark the plan as low-priority. When the
+agent is started with `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`),
+plans marked `priority: low` are bypassed on every cycle. This lets you
+run the agent during the day with the flag set (saving tokens on
+nice-to-haves) and drop the flag at night so the low-priority queue drains
+overnight. Any value other than `low` is treated as normal priority, and
+omitting the field behaves the same way.
 
 **`base-branch`** — declare a dependency on another plan's branch. Instead of
 starting from `main`, the agent checks out the named branch before executing.
@@ -87,6 +96,7 @@ repo checks out `019`'s branch and the new commits stack on top; the
 - **Targeted diffs** — each review round sees exactly its own commit, not HEAD~1
 - **Plan-aware review** — reviewers and the fix agent both receive the plan text alongside the diff, so deliberate changes that match the plan are not flagged as regressions
 - **Stacked plans** — a plan can declare `base-branch:` in its frontmatter to start from another plan's branch instead of `main`, allowing dependent plans to queue before their parents are merged
+- **Low-priority queue** — plans marked `priority: low` can be skipped during the day (`--skip-low-priority`) and drained overnight, so token-heavy nice-to-haves don't starve high-value work
 - **Lock file** — prevents concurrent agent instances
 - **Done files** — full audit trail with repos changed, commit hashes, and review content
 
@@ -108,6 +118,7 @@ Set env vars before starting `src/agent.sh`:
 | `OWL_REVIEWER2_LABEL` | `Claude Code` | Reviewer slot 2 label in logs/output |
 | `OWL_REVIEW_MODE` | `parallel` | Reviewer scheduling: `parallel` or `sequential` |
 | `REVIEW_ITERATIONS` | 2 | Default review-fix cycles per plan (plans may override up to 3 via frontmatter) |
+| `OWL_SKIP_LOW_PRIORITY` | `0` | When `1`, skip plans with `priority: low` in frontmatter. Equivalent to the `--skip-low-priority` CLI flag. |
 | `RETRY_WAIT` | 600 | Seconds between rate-limit retries |
 | `MAX_RETRIES` | 50 | Max retry attempts (~8 hours) |
 
@@ -137,12 +148,20 @@ export OWL_REVIEWER2_MODEL=claude-sonnet-4-6
 # Start the agent
 ./src/agent.sh
 
+# Start with low-priority plans skipped (daytime token-saving mode)
+./src/agent.sh --skip-low-priority
+
 # Watch progress
 tail -f agent.log
 
 # Stop
 Ctrl+C or kill the process
 ```
+
+The `--skip-low-priority` flag and `OWL_SKIP_LOW_PRIORITY=1` env var are
+equivalent. A typical workflow: run with `--skip-low-priority` during the
+day while you iterate on high-value work, then restart without the flag at
+night so the queued low-priority plans drain overnight.
 
 ## Notes
 
