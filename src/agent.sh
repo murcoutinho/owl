@@ -44,6 +44,20 @@ REVIEWER2_LABEL="${OWL_REVIEWER2_LABEL:-Claude Code 2}"
 # Review mode: "parallel" or "sequential"
 REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
+# Target repos (space-separated directory names under PROJECT_DIR)
+# Only these repos will be managed by Owl. Set via OWL_TARGET_REPOS env var.
+TARGET_REPOS="${OWL_TARGET_REPOS:-saudade saudade-mobile}"
+
+# List .git dirs for target repos only (null-delimited, compatible with existing loops)
+find_target_repos() {
+  for repo_name in $TARGET_REPOS; do
+    local git_dir="$PROJECT_DIR/$repo_name/.git"
+    if [ -d "$git_dir" ]; then
+      printf '%s\0' "$git_dir"
+    fi
+  done
+}
+
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
@@ -166,7 +180,7 @@ reset_all_repos_to_main() {
     git -C "$repo_root" pull --ff-only origin main 2>>"$LOG_FILE" || \
       log "  $repo_name: pull --ff-only failed (may need manual merge)"
 
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+  done < <(find_target_repos)
 }
 
 
@@ -234,7 +248,7 @@ EOF
       log "Failed to create PR in $repo_name: $pr_url"
     fi
 
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+  done < <(find_target_repos)
 }
 
 # ─── Step 8: Switch all repos back to main ───
@@ -244,7 +258,7 @@ switch_all_to_main() {
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       git -C "$repo_root" checkout main 2>>"$LOG_FILE" || log "  $(basename "$repo_root"): WARNING — failed to checkout main"
     fi
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+  done < <(find_target_repos)
 }
 
 # ─── Execute plan ───
@@ -278,7 +292,7 @@ execute_plan() {
        [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
       echo "$repo_root" >> "$pre_dirty_file"
     fi
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+  done < <(find_target_repos)
 
   if [ -s "$pre_dirty_file" ]; then
     log "Plan execution aborted before $IMPL_PROVIDER: repos have pre-existing local changes."
@@ -326,7 +340,7 @@ PLANEOF
         git -C "$repo_root" checkout -- . 2>>"$LOG_FILE"
         git -C "$repo_root" clean -fd 2>>"$LOG_FILE"
       fi
-    done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+    done < <(find_target_repos)
     return 1
   fi
 
@@ -381,7 +395,7 @@ PLANEOF
     printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$main_hash" "$after_hash" >> "$plan_work_dir/review_input_1.tsv"
     printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
 
-  done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+  done < <(find_target_repos)
 
   # ── Check that something was actually committed ──
   if [ ! -s "$plan_work_dir/review_input_1.tsv" ]; then
@@ -413,7 +427,7 @@ run_review_loop() {
       if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
         git -C "$repo_root" checkout "$branch_name" 2>/dev/null
       fi
-    done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+    done < <(find_target_repos)
   fi
 
   local reviews_done=0
@@ -617,7 +631,7 @@ FIXEOF
       log "  $repo_name: fix committed ($short_hash)"
       printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$before_hash" "$after_hash" >> "$next_manifest"
       printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
-    done < <(find "$PROJECT_DIR" -maxdepth 2 -name ".git" -type d -print0 2>/dev/null)
+    done < <(find_target_repos)
 
     review_rounds_completed=$i
     echo "reviews_done=$i" > "$plan_work_dir/state"
