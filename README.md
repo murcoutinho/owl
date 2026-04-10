@@ -41,18 +41,43 @@ Example: `003-add-login-page.md`
 
 ### Optional frontmatter
 
-A plan can override the default number of review-fix cycles via YAML frontmatter.
-Values are clamped to `[1, 3]`; anything missing or invalid falls back to the
-`REVIEW_ITERATIONS` default.
+Plans can declare configuration via YAML frontmatter. All fields are optional.
 
 ```markdown
 ---
 review-rounds: 3
+base-branch: owl/019-earlier-dependency
 ---
 
 # Add login page
 ...
 ```
+
+**`review-rounds`** — override the default number of review-fix cycles.
+Values are clamped to `[1, 3]`; anything missing or invalid falls back to the
+`REVIEW_ITERATIONS` default.
+
+**`base-branch`** — declare a dependency on another plan's branch. Instead of
+starting from `main`, the agent checks out the named branch before executing.
+Use this when a plan depends on work that is still sitting in a queued or
+in-flight plan (and whose PR may not be merged yet). The value must be a
+literal branch name — owl does not cross-reference other plan files.
+
+At execution time:
+
+- For each repo, owl tries `git fetch origin <base-branch>`. If origin has
+  the branch, the repo is checked out to it and the plan is built on top.
+- If origin does NOT have the branch (the dependency was already merged and
+  deleted), that repo silently falls back to `main`. This is the expected
+  happy path once the dependency ships.
+- PRs opened for the new plan target the same base: `gh pr create --base`
+  uses the resolved per-repo base, so stacked PRs point at the right parent.
+
+Example chain: plan `019` touches `saudade`. Plan `020` touches both `saudade`
+and `saudade-mobile`, and the `saudade` half depends on plan `019`. Add
+`base-branch: owl/019-...` to plan `020`. When owl runs `020`, the `saudade`
+repo checks out `019`'s branch and the new commits stack on top; the
+`saudade-mobile` repo has no `019` branch on origin and silently uses `main`.
 
 ## Features
 
@@ -60,6 +85,8 @@ review-rounds: 3
 - **Resume on crash** — pending reviews survive restarts via state files
 - **Multi-repo** — commits and reviews across all git repos in the parent directory
 - **Targeted diffs** — each review round sees exactly its own commit, not HEAD~1
+- **Plan-aware review** — reviewers and the fix agent both receive the plan text alongside the diff, so deliberate changes that match the plan are not flagged as regressions
+- **Stacked plans** — a plan can declare `base-branch:` in its frontmatter to start from another plan's branch instead of `main`, allowing dependent plans to queue before their parents are merged
 - **Lock file** — prevents concurrent agent instances
 - **Done files** — full audit trail with repos changed, commit hashes, and review content
 
