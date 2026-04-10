@@ -49,6 +49,45 @@ REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 # Only these repos will be managed by Owl. Set via OWL_TARGET_REPOS env var.
 TARGET_REPOS="${OWL_TARGET_REPOS:-saudade saudade-mobile}"
 
+# Low-priority plans are skipped when this is "1". Default: include everything.
+# Controlled by env var OWL_SKIP_LOW_PRIORITY or the CLI flag --skip-low-priority.
+# Use case: run during the day with --skip-low-priority to save tokens, then at
+# night re-run without the flag to drain the low-priority queue.
+SKIP_LOW_PRIORITY="${OWL_SKIP_LOW_PRIORITY:-0}"
+
+# Parse CLI args (only --skip-low-priority and --help supported for now).
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --skip-low-priority)
+      SKIP_LOW_PRIORITY=1
+      shift
+      ;;
+    --include-low-priority)
+      SKIP_LOW_PRIORITY=0
+      shift
+      ;;
+    -h|--help)
+      cat <<'HELPEOF'
+Usage: agent.sh [--skip-low-priority] [--include-low-priority]
+
+  --skip-low-priority     Skip plans whose frontmatter has `priority: low`.
+                          Also honored via env var OWL_SKIP_LOW_PRIORITY=1.
+  --include-low-priority  Force-include low-priority plans even if the env
+                          var is set (useful for a nightly drain run).
+  -h, --help              Show this help.
+
+All other configuration is via environment variables — see README.
+HELPEOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      echo "Use --help for usage." >&2
+      exit 2
+      ;;
+  esac
+done
+
 # List .git dirs for target repos only (null-delimited, compatible with existing loops)
 find_target_repos() {
   for repo_name in $TARGET_REPOS; do
@@ -113,6 +152,30 @@ parse_plan_review_rounds() {
     fi
   else
     echo "$REVIEW_ITERATIONS"
+  fi
+}
+
+# Parse `priority:` from plan frontmatter. Prints "low" if the plan declares
+# low priority, empty string otherwise (meaning normal priority).
+# Accepted values: "low" (case-insensitive). Anything else is treated as normal.
+parse_plan_priority() {
+  local plan_file="$1"
+  local value
+  value=$(awk '
+    NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; next }
+    in_fm && /^---[[:space:]]*$/ { exit }
+    in_fm && /^[[:space:]]*priority[[:space:]]*:/ {
+      sub(/^[[:space:]]*priority[[:space:]]*:[[:space:]]*/, "")
+      sub(/[[:space:]]+$/, "")
+      gsub(/^["'"'"']|["'"'"']$/, "")
+      print
+      exit
+    }
+  ' "$plan_file")
+  # Normalize to lowercase and only emit "low"; anything else → "".
+  value=$(echo "$value" | tr '[:upper:]' '[:lower:]')
+  if [ "$value" = "low" ]; then
+    echo "low"
   fi
 }
 
@@ -901,8 +964,24 @@ check_plans() {
   fi
 
   local found=0
+  local skipped_low=0
   while IFS= read -r -d '' plan_file; do
     [ -f "$plan_file" ] || continue
+
+    # Honor low-priority skip: plans marked `priority: low` in frontmatter
+    # are bypassed when SKIP_LOW_PRIORITY=1. Still count them as found so
+    # the "No plans found" message does not fire when the queue only
+    # contains skipped items.
+    if [ "$SKIP_LOW_PRIORITY" = "1" ]; then
+      local plan_priority
+      plan_priority="$(parse_plan_priority "$plan_file")"
+      if [ "$plan_priority" = "low" ]; then
+        log "  skipping low-priority plan: $(basename "$plan_file") (SKIP_LOW_PRIORITY=1)"
+        skipped_low=$((skipped_low + 1))
+        continue
+      fi
+    fi
+
     found=1
     if ! execute_plan "$plan_file"; then
       log "Plan failed — will retry next cycle. Stopping current cycle."
@@ -911,7 +990,11 @@ check_plans() {
   done < <(find "$PLAN_DIR" -maxdepth 1 -name "*.md" -print0 2>/dev/null | sort -z)
 
   if [ $found -eq 0 ]; then
-    log "No plans found."
+    if [ $skipped_low -gt 0 ]; then
+      log "No eligible plans found ($skipped_low low-priority plan(s) skipped)."
+    else
+      log "No plans found."
+    fi
   fi
 }
 
@@ -922,6 +1005,11 @@ log "Dev Agent started. Checking every $(format_poll_interval "$POLL_INTERVAL_SE
 log "Plan directory: $PLAN_DIR"
 log "Project directory: $PROJECT_DIR"
 log "Review iterations: $REVIEW_ITERATIONS (default; plans may override up to $MAX_REVIEW_ROUNDS via frontmatter)"
+if [ "$SKIP_LOW_PRIORITY" = "1" ]; then
+  log "Low-priority plans: SKIPPING (plans with 'priority: low' in frontmatter will be bypassed)"
+else
+  log "Low-priority plans: INCLUDED"
+fi
 
 while true; do
   check_plans
