@@ -23,6 +23,7 @@ WORK_DIR="$SCRIPT_DIR/../.work"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOCK_FILE="$SCRIPT_DIR/../.agent.lock"
 REVIEW_ITERATIONS=2
+MAX_REVIEW_ROUNDS=3
 RETRY_WAIT=600
 MAX_RETRIES=50
 POLL_INTERVAL_SECONDS="${OWL_POLL_INTERVAL_SECONDS:-600}"
@@ -76,6 +77,43 @@ format_poll_interval() {
 
 normalize_provider() {
   echo "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+# Print the plan file with YAML frontmatter (--- ... ---) stripped.
+strip_plan_frontmatter() {
+  local plan_file="$1"
+  awk '
+    NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; next }
+    in_fm && /^---[[:space:]]*$/ { in_fm = 0; next }
+    !in_fm { print }
+  ' "$plan_file"
+}
+
+# Parse review-rounds from plan frontmatter. Prints the clamped value,
+# or $REVIEW_ITERATIONS if missing/invalid/no frontmatter.
+parse_plan_review_rounds() {
+  local plan_file="$1"
+  local value
+  value=$(awk '
+    NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; next }
+    in_fm && /^---[[:space:]]*$/ { exit }
+    in_fm && /^[[:space:]]*review[-_]rounds[[:space:]]*:/ {
+      sub(/^[[:space:]]*review[-_]rounds[[:space:]]*:[[:space:]]*/, "")
+      gsub(/[[:space:]]/, "")
+      print
+      exit
+    }
+  ' "$plan_file")
+
+  if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ]; then
+    if [ "$value" -gt "$MAX_REVIEW_ROUNDS" ]; then
+      echo "$MAX_REVIEW_ROUNDS"
+    else
+      echo "$value"
+    fi
+  else
+    echo "$REVIEW_ITERATIONS"
+  fi
 }
 
 run_llm() {
@@ -194,7 +232,7 @@ push_and_open_prs() {
   local review_rounds_total="$6"
 
   local plan_content
-  plan_content=$(cat "$plan_file")
+  plan_content=$(strip_plan_frontmatter "$plan_file")
 
   while IFS= read -r -d '' repo_dir; do
     local repo_root="$(dirname "$repo_dir")"
@@ -271,11 +309,16 @@ execute_plan() {
   log "========================================="
 
   local plan_content
-  plan_content="$(cat "$plan_file")"
+  plan_content="$(strip_plan_frontmatter "$plan_file")"
+
+  local plan_review_iterations
+  plan_review_iterations="$(parse_plan_review_rounds "$plan_file")"
+  log "Review rounds for this plan: $plan_review_iterations (max $MAX_REVIEW_ROUNDS)"
 
   local work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
   local plan_work_dir="$WORK_DIR/$work_id"
   mkdir -p "$plan_work_dir"
+  echo "$plan_review_iterations" > "$plan_work_dir/review_iterations"
 
   local branch_name="owl/${plan_name%.md}"
 
@@ -420,6 +463,19 @@ run_review_loop() {
   local branch_name=""
   [ -f "$plan_work_dir/branch" ] && branch_name=$(cat "$plan_work_dir/branch")
 
+  # Per-plan review iteration count (persisted so resumes honor the plan's setting)
+  local review_iterations=$REVIEW_ITERATIONS
+  if [ -f "$plan_work_dir/review_iterations" ]; then
+    local stored
+    stored=$(cat "$plan_work_dir/review_iterations")
+    if [[ "$stored" =~ ^[0-9]+$ ]] && [ "$stored" -ge 1 ]; then
+      review_iterations=$stored
+      if [ "$review_iterations" -gt "$MAX_REVIEW_ROUNDS" ]; then
+        review_iterations=$MAX_REVIEW_ROUNDS
+      fi
+    fi
+  fi
+
   # Ensure we're on the right branch
   if [ -n "$branch_name" ]; then
     while IFS= read -r -d '' repo_dir; do
@@ -439,9 +495,9 @@ run_review_loop() {
   local review_rounds_completed=$reviews_done
   local reviews_skipped=0
 
-  for i in $(seq $((reviews_done + 1)) $REVIEW_ITERATIONS); do
+  for i in $(seq $((reviews_done + 1)) $review_iterations); do
     log "-----------------------------------------"
-    log "[Iteration $i/$REVIEW_ITERATIONS] Review phase"
+    log "[Iteration $i/$review_iterations] Review phase"
     log "-----------------------------------------"
 
     local manifest="$plan_work_dir/review_input_$i.tsv"
@@ -581,7 +637,7 @@ $reviewer2_review"
     fi
 
     # ── Fix phase ──
-    log "[Iteration $i/$REVIEW_ITERATIONS] Fix phase"
+    log "[Iteration $i/$review_iterations] Fix phase"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
     cat > "$fix_prompt_file" <<FIXEOF
@@ -641,7 +697,7 @@ FIXEOF
   local reviews_successful=$(( review_rounds_completed > reviews_skipped ? review_rounds_completed - reviews_skipped : 0 ))
   if [ -n "$branch_name" ]; then
     log "[Step 7] Pushing branches and opening PRs..."
-    push_and_open_prs "$branch_name" "$plan_name" "$plan_file" "$plan_work_dir" "$reviews_successful" "$REVIEW_ITERATIONS"
+    push_and_open_prs "$branch_name" "$plan_name" "$plan_file" "$plan_work_dir" "$reviews_successful" "$review_iterations"
   fi
 
   # ── Step 8: Switch back to main ──
@@ -658,14 +714,14 @@ FIXEOF
   local done_path="$PLAN_DIR/done/$done_name"
 
   {
-    cat "$plan_file"
+    strip_plan_frontmatter "$plan_file"
     echo ""
     echo "---"
     echo ""
     echo "## Execution Summary"
     echo ""
     echo "- **Completed:** $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "- **Review rounds:** $reviews_successful completed / $REVIEW_ITERATIONS total"
+    echo "- **Review rounds:** $reviews_successful completed / $review_iterations total"
     echo "- **Repos changed:**"
     if [ -f "$plan_work_dir/commits.tsv" ]; then
       while IFS=$'\t' read -r repo_name hash; do
@@ -698,6 +754,7 @@ FIXEOF
   rm "$plan_file"
   rm -f "$plan_work_dir/pending"
   rm -f "$plan_work_dir/state"
+  rm -f "$plan_work_dir/review_iterations"
   log "Wrote done file: $done_name"
 }
 
@@ -754,7 +811,7 @@ acquire_lock
 log "Dev Agent started. Checking every $(format_poll_interval "$POLL_INTERVAL_SECONDS")."
 log "Plan directory: $PLAN_DIR"
 log "Project directory: $PROJECT_DIR"
-log "Review iterations: $REVIEW_ITERATIONS"
+log "Review iterations: $REVIEW_ITERATIONS (default; plans may override up to $MAX_REVIEW_ROUNDS via frontmatter)"
 
 while true; do
   check_plans
