@@ -39,6 +39,21 @@ Plans are markdown files describing what to build. Include:
 
 Example: `003-add-login-page.md`
 
+### Optional frontmatter
+
+A plan can override the default number of review-fix cycles via YAML frontmatter.
+Values are clamped to `[1, 3]`; anything missing or invalid falls back to the
+`REVIEW_ITERATIONS` default.
+
+```markdown
+---
+review-rounds: 3
+---
+
+# Add login page
+...
+```
+
 ## Features
 
 - **Rate limit resilience** — retries every 10 minutes on 429/overloaded, up to ~8 hours
@@ -65,7 +80,7 @@ Set env vars before starting `src/agent.sh`:
 | `OWL_REVIEWER2_MODEL` | `claude-sonnet-4-6` | Reviewer slot 2 model |
 | `OWL_REVIEWER2_LABEL` | `Claude Code` | Reviewer slot 2 label in logs/output |
 | `OWL_REVIEW_MODE` | `parallel` | Reviewer scheduling: `parallel` or `sequential` |
-| `REVIEW_ITERATIONS` | 2 | Number of review-fix cycles per plan |
+| `REVIEW_ITERATIONS` | 2 | Default review-fix cycles per plan (plans may override up to 3 via frontmatter) |
 | `RETRY_WAIT` | 600 | Seconds between rate-limit retries |
 | `MAX_RETRIES` | 50 | Max retry attempts (~8 hours) |
 
