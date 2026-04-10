@@ -9,7 +9,7 @@ An autonomous dev agent that executes plans using Claude Code and/or Codex, with
 ## How It Works
 
 1. Drop a `.md` plan file into `plan/` with a numeric prefix (e.g., `001-my-task.md`)
-2. Start the agent: `./src/agent.sh`
+2. Start the agent: `./src/owl.sh`
 3. Every 10 minutes, the agent picks up the next plan by order and:
    - **Executes** the plan via the configured provider
    - **Commits** all changes across any git repos in the parent directory
@@ -23,7 +23,7 @@ An autonomous dev agent that executes plans using Claude Code and/or Codex, with
 ```
 owl/
 ├── src/
-│   └── agent.sh        # The agent (main loop + review engine)
+│   └── owl.sh          # The agent (main loop + review engine)
 ├── plan/               # Drop .md plan files here (numbered: 001-, 002-, ...)
 │   └── done/           # Completed plans with execution summaries
 └── README.md
@@ -102,7 +102,7 @@ repo checks out `019`'s branch and the new commits stack on top; the
 
 ## Configuration
 
-Set env vars before starting `src/agent.sh`:
+Set env vars before starting `src/owl.sh`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -146,10 +146,10 @@ export OWL_REVIEWER2_MODEL=claude-sonnet-4-6
 
 ```bash
 # Start the agent
-./src/agent.sh
+./src/owl.sh
 
 # Start with low-priority plans skipped (daytime token-saving mode)
-./src/agent.sh --skip-low-priority
+./src/owl.sh --skip-low-priority
 
 # Watch progress
 tail -f agent.log
