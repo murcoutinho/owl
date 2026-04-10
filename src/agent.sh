@@ -460,6 +460,14 @@ run_review_loop() {
   local plan_name="$2"
   local plan_work_dir="$3"
 
+  # Load the plan so reviewers and the fix agent can see the author's intent.
+  # Without this, reviewers flag deliberate changes as regressions because they
+  # only see the diff, not what the plan asked for.
+  local plan_content=""
+  if [ -f "$plan_file" ]; then
+    plan_content="$(strip_plan_frontmatter "$plan_file")"
+  fi
+
   local branch_name=""
   [ -f "$plan_work_dir/branch" ] && branch_name=$(cat "$plan_work_dir/branch")
 
@@ -508,10 +516,22 @@ run_review_loop() {
       continue
     fi
 
-    # Build review prompt — tell the LLM where to look, it reads the diff itself
+    # Build review prompt — tell the LLM where to look, it reads the diff itself.
+    # The plan is included so the reviewer can check the diff against the author's
+    # intent instead of flagging deliberate changes as regressions.
     local review_prompt_file="$plan_work_dir/review_prompt_$i.txt"
     {
-      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
+      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Judge the diff against the plan below — if a change looks surprising but matches what the plan explicitly asked for, that is NOT a bug and must not be flagged. Only flag things that are wrong relative to the plan or introduce genuine defects (security, correctness, crashes, obviously broken logic). Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
+      echo ""
+      echo "## Plan being implemented"
+      echo ""
+      if [ -n "$plan_content" ]; then
+        echo "$plan_content"
+      else
+        echo "(plan file unavailable)"
+      fi
+      echo ""
+      echo "## Commits to review"
       echo ""
       echo "Use git diff to inspect the changes. Here are the repos and commit ranges to review:"
       echo ""
@@ -643,7 +663,13 @@ $reviewer2_review"
     cat > "$fix_prompt_file" <<FIXEOF
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
+CRITICAL: The plan below is the source of truth for what the code should do. If a reviewer comment contradicts the plan (e.g. asks you to revert a change that the plan explicitly requested), IGNORE that comment. Only apply fixes that are consistent with the plan. If a reviewer asks a hedged question ("if X is intentional, document it; if not, revert") and the plan confirms X is intentional, prefer a short comment or docstring over reverting.
+
 IMPORTANT: Do NOT commit, push, or create branches. Just write the code fixes.
+
+## Plan being implemented
+
+${plan_content:-(plan file unavailable)}
 
 ## Review Feedback
 
