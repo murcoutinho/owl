@@ -68,7 +68,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     -h|--help)
       cat <<'HELPEOF'
-Usage: agent.sh [--skip-low-priority] [--include-low-priority]
+Usage: owl.sh [--skip-low-priority] [--include-low-priority]
 
   --skip-low-priority     Skip plans whose frontmatter has `priority: low`.
                           Also honored via env var OWL_SKIP_LOW_PRIORITY=1.
