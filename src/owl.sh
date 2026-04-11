@@ -22,6 +22,13 @@ LOG_FILE="$SCRIPT_DIR/../agent.log"
 WORK_DIR="$SCRIPT_DIR/../.work"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOCK_FILE="$SCRIPT_DIR/../.agent.lock"
+
+# Optional local machine-specific config. Keep instance details like
+# repository names out of the tracked repo.
+if [ -f "$SCRIPT_DIR/../.env.local" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/../.env.local"
+fi
 REVIEW_ITERATIONS=2
 MAX_REVIEW_ROUNDS=3
 RETRY_WAIT=600
@@ -46,8 +53,13 @@ REVIEWER2_LABEL="${OWL_REVIEWER2_LABEL:-Claude Code 2}"
 REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
 # Target repos (space-separated directory names under PROJECT_DIR)
-# Only these repos will be managed by Owl. Set via OWL_TARGET_REPOS env var.
-TARGET_REPOS="${OWL_TARGET_REPOS:-owl saudade saudade-mobile}"
+# Only these repos will be managed by Owl. Must be set via environment or the
+# ignored .env.local file next to this script.
+TARGET_REPOS="${OWL_TARGET_REPOS:-}"
+if [ -z "$TARGET_REPOS" ]; then
+  echo "OWL_TARGET_REPOS is not set. Configure it in the environment or in .env.local." >&2
+  exit 2
+fi
 
 # Low-priority plans are skipped when this is "1". Default: include everything.
 # Controlled by env var OWL_SKIP_LOW_PRIORITY or the CLI flag --skip-low-priority.
