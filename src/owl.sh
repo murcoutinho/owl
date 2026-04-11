@@ -1183,21 +1183,42 @@ check_plans() {
 
   local found=0
   local skipped_low=0
+
+  # Two-pass drain: always run normal-priority plans first in filename order,
+  # then drain low-priority plans in filename order. This keeps high-value work
+  # from getting stuck behind a cheap nice-to-have that happens to have a
+  # smaller numeric prefix. When SKIP_LOW_PRIORITY=1, the second pass skips
+  # every low-priority plan instead of executing it.
+
+  # ── Pass 1: normal-priority plans ──
   while IFS= read -r -d '' plan_file; do
     [ -f "$plan_file" ] || continue
+    local plan_priority
+    plan_priority="$(parse_plan_priority "$plan_file")"
+    if [ "$plan_priority" = "low" ]; then
+      continue
+    fi
 
-    # Honor low-priority skip: plans marked `priority: low` in frontmatter
-    # are bypassed when SKIP_LOW_PRIORITY=1. Still count them as found so
-    # the "No plans found" message does not fire when the queue only
-    # contains skipped items.
+    found=1
+    if ! execute_plan "$plan_file"; then
+      log "Plan failed — will retry next cycle. Stopping current cycle."
+      return
+    fi
+  done < <(find "$PLAN_DIR" -maxdepth 1 -name "*.md" -print0 2>/dev/null | sort -z)
+
+  # ── Pass 2: low-priority plans (drain after all normal plans have run) ──
+  while IFS= read -r -d '' plan_file; do
+    [ -f "$plan_file" ] || continue
+    local plan_priority
+    plan_priority="$(parse_plan_priority "$plan_file")"
+    if [ "$plan_priority" != "low" ]; then
+      continue
+    fi
+
     if [ "$SKIP_LOW_PRIORITY" = "1" ]; then
-      local plan_priority
-      plan_priority="$(parse_plan_priority "$plan_file")"
-      if [ "$plan_priority" = "low" ]; then
-        log "  skipping low-priority plan: $(basename "$plan_file") (SKIP_LOW_PRIORITY=1)"
-        skipped_low=$((skipped_low + 1))
-        continue
-      fi
+      log "  skipping low-priority plan: $(basename "$plan_file") (SKIP_LOW_PRIORITY=1)"
+      skipped_low=$((skipped_low + 1))
+      continue
     fi
 
     found=1

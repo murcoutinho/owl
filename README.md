@@ -66,13 +66,20 @@ base-branch: owl/019-earlier-dependency
 Values are clamped to `[1, 3]`; anything missing or invalid falls back to the
 `REVIEW_ITERATIONS` default.
 
-**`priority`** — set to `low` to mark the plan as low-priority. When the
-agent is started with `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`),
-plans marked `priority: low` are bypassed on every cycle. This lets you
-run the agent during the day with the flag set (saving tokens on
-nice-to-haves) and drop the flag at night so the low-priority queue drains
-overnight. Any value other than `low` is treated as normal priority, and
-omitting the field behaves the same way.
+**`priority`** — set to `low` to mark the plan as low-priority. Each cycle
+runs in two passes: normal-priority plans first (in filename order), then
+low-priority plans (in filename order) after every normal plan has been
+executed. This guarantees a nice-to-have with a smaller numeric prefix
+never blocks a higher-value plan queued later — e.g. with `023-lp.md`,
+`024-normal.md`, `025-lp.md`, the execution order is `024 → 023 → 025`.
+
+When the agent is started with `--skip-low-priority` (or
+`OWL_SKIP_LOW_PRIORITY=1`), the second pass is a no-op — every
+`priority: low` plan is logged and bypassed. This lets you run the agent
+during the day with the flag set (saving tokens on nice-to-haves) and
+drop the flag at night so the low-priority queue drains overnight. Any
+value other than `low` is treated as normal priority, and omitting the
+field behaves the same way.
 
 **`base-branch`** — declare a dependency on another plan's branch. Instead of
 starting from `main`, the agent checks out the named branch before executing.
@@ -105,7 +112,7 @@ repo checks out `019`'s branch and the new commits stack on top; the
 - **Plan-aware review** — reviewers and the fix agent both receive the plan text alongside the diff, so deliberate changes that match the plan are not flagged as regressions
 - **Deterministic test gate** — opt-in per repo via `OWL_TEST_CMD_<repo>`; Owl runs the command at the top of every review round and feeds failing output to the fix agent alongside LLM reviewer feedback, and refuses to LGTM-exit while any suite is red
 - **Stacked plans** — a plan can declare `base-branch:` in its frontmatter to start from another plan's branch instead of `main`, allowing dependent plans to queue before their parents are merged
-- **Low-priority queue** — plans marked `priority: low` can be skipped during the day (`--skip-low-priority`) and drained overnight, so token-heavy nice-to-haves don't starve high-value work
+- **Low-priority queue** — plans marked `priority: low` always drain *after* every normal-priority plan in the same cycle (two-pass), so a cheap nice-to-have with a smaller numeric prefix never blocks higher-value work. `--skip-low-priority` bypasses them entirely during the day and overnight runs drain them.
 - **Lock file** — prevents concurrent agent instances
 - **Done files** — full audit trail with repos changed, commit hashes, and review content
 
