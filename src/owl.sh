@@ -399,14 +399,25 @@ reset_all_repos_to_base() {
 
     # Decide which branch this repo should land on. Start from the requested
     # base; if origin does not have it, fall back to main for this repo.
+    #
+    # We REQUIRE the explicit fetch to succeed, not just the cached ref to
+    # exist. Otherwise a stale `refs/remotes/origin/<base>` cached from an
+    # earlier Owl run (when the base plan was still in flight) keeps fooling
+    # rev-parse into thinking the branch is still on origin, even after the
+    # base plan was merged and its upstream branch auto-deleted. That stale-
+    # ref trap would make the dependent plan run on yesterday's base instead
+    # of today's main.
     local target_branch="main"
     if [ -n "$base_branch" ]; then
-      git -C "$repo_root" fetch origin "$base_branch" 2>/dev/null
-      if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
+      if git -C "$repo_root" fetch origin "$base_branch" 2>/dev/null && \
+         git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
         target_branch="$base_branch"
         log "  $repo_name: using base branch '$base_branch' from origin"
       else
         log "  $repo_name: base branch '$base_branch' not on origin — falling back to main"
+        # Prune the stale cached ref if one exists, so any later command on
+        # this repo does not accidentally resurrect it.
+        git -C "$repo_root" update-ref -d "refs/remotes/origin/$base_branch" 2>/dev/null || true
       fi
     fi
 
@@ -467,12 +478,18 @@ push_and_open_prs() {
     fi
 
     # Determine the PR base for this repo. Default to main; if the plan
-    # declared a base branch AND origin has it, target that instead.
+    # declared a base branch AND origin CURRENTLY has it, target that
+    # instead. Same stale-ref defense as reset_all_repos_to_base: require
+    # the explicit fetch to succeed, not just the cached ref to exist.
+    # Otherwise `gh pr create --base <deleted-branch>` would fail after the
+    # ancestor plan merged and its branch was auto-deleted.
     local repo_pr_base="main"
     if [ -n "$pr_base_branch" ]; then
-      git -C "$repo_root" fetch origin "$pr_base_branch" 2>/dev/null
-      if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$pr_base_branch" >/dev/null 2>&1; then
+      if git -C "$repo_root" fetch origin "$pr_base_branch" 2>/dev/null && \
+         git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$pr_base_branch" >/dev/null 2>&1; then
         repo_pr_base="$pr_base_branch"
+      else
+        git -C "$repo_root" update-ref -d "refs/remotes/origin/$pr_base_branch" 2>/dev/null || true
       fi
     fi
 
