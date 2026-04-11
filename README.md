@@ -6,11 +6,9 @@
   <img src="owl.png" width="400" alt="Owl — autonomous dev agent" />
 </p>
 
-Owl is an autonomous dev agent that executes queued plans, commits code, runs review rounds, and opens PRs across one or more sibling repos.
+**Want to spend your tokens while you sleep?** Owl is an autonomous dev agent that works through your plan queue overnight — writing code, running multi-model review rounds, and opening PRs across one or more sibling repos. Drop a markdown plan into `plan/`, start Owl, and wake up to reviewed pull requests ready to merge.
 
-> **Security notice.** Owl runs `claude --dangerously-skip-permissions` and `codex exec --full-auto --skip-git-repo-check` against your code, then commits and pushes branches. Use it only on repos you trust.
-
-> **Recommendation.** Prefer Claude for the implementation/fix role when you care about context continuity and token efficiency across review rounds. Owl reuses a persistent per-plan Claude session for coder/fix work. Codex does not currently expose the same explicit `--session-id` control Owl uses for that feature: https://github.com/openai/codex/issues/15271?utm_source=chatgpt.com&issue=openai%7Ccodex%7C7801
+Owl orchestrates Claude and Codex side by side so implementation, fixes, and reviews each use the strongest model for the job. It stacks dependent plans, gates PRs behind your own deterministic test commands, resumes cleanly after rate limits, and keeps a full work log for every run.
 
 ## How it works
 
@@ -81,6 +79,8 @@ Keep plans self-contained. Reviewers only see the plan text plus diffs.
 - Done files and per-plan work logs under `.work/`
 
 ## Configuration
+
+> **Tip.** Prefer Claude for the implementation/fix role when you care about context continuity and token efficiency across review rounds. Owl reuses a persistent per-plan Claude session for coder/fix work; Codex does not currently expose the same explicit `--session-id` control ([openai/codex#15271](https://github.com/openai/codex/issues/15271)).
 
 Set env vars before running `src/owl.sh`:
 
@@ -153,6 +153,10 @@ Notes:
 ## Skill
 
 The repo includes a plan-authoring skill at [skills/owl-plan-author/SKILL.md](/Users/lanabarreto/Documents/Murilo/owl/skills/owl-plan-author/SKILL.md). Use it when you want an agent to draft a new Owl plan with the right numbering, frontmatter, and queue hygiene.
+
+## Security
+
+Owl runs `claude --dangerously-skip-permissions` and `codex exec --full-auto --skip-git-repo-check`, then commits and pushes branches without prompting between steps. Point it only at repositories you own and trust, and review every PR it opens before merging.
 
 ## License
 
