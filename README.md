@@ -18,7 +18,9 @@ An autonomous dev agent that executes plans using Claude Code and/or Codex, with
 > care about token efficiency across review rounds. Owl now reuses a
 > persistent per-plan Claude session for coder/fix work, so the coder keeps
 > context between rounds instead of rebuilding it from scratch each time.
-> Reviewers can stay fresh and independent.
+> Reviewers can stay fresh and independent. Codex does not currently offer
+> the same explicit `--session-id` control that Owl uses for this feature:
+> https://github.com/openai/codex/issues/15271?utm_source=chatgpt.com&issue=openai%7Ccodex%7C7801
 
 ## How It Works
 
