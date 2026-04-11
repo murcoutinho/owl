@@ -57,7 +57,7 @@ base-branch: owl/021-some-earlier-plan
 - Use `2` (or omit) for default-size plans.
 - Use `3` for large multi-repo refactors with significant risk.
 
-**`priority: low`** — marks as low-priority. With `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`), these plans are bypassed on every cycle and only drain when the flag is dropped. Use for nice-to-haves that shouldn't compete with active work.
+**`priority: low`** — marks as low-priority. Each cycle drains normal-priority plans in filename order first, then low-priority plans in filename order — so a `priority: low` plan with a smaller numeric prefix will still run *after* every normal plan, not before. With `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`), these plans are bypassed entirely on every cycle and only drain when the flag is dropped. Use for nice-to-haves that shouldn't compete with active work.
 
 **`base-branch: <branch-name>`** — start from this branch instead of `main`. Use when this plan depends on code from another plan that is still queued or in-flight. If the named branch has already merged and been deleted on origin, Owl silently falls back to `main`.
 
