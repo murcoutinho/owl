@@ -14,6 +14,12 @@ An autonomous dev agent that executes plans using Claude Code and/or Codex, with
 > trust and have reviewed, and make sure your providers' scopes match what
 > you are comfortable letting an agent do. Review every PR before merging.
 
+> **Recommendation.** Prefer Claude for the implementation/fix role when you
+> care about token efficiency across review rounds. Owl now reuses a
+> persistent per-plan Claude session for coder/fix work, so the coder keeps
+> context between rounds instead of rebuilding it from scratch each time.
+> Reviewers can stay fresh and independent.
+
 ## How It Works
 
 1. Drop a `.md` plan file into `plan/` with a numeric prefix (e.g., `001-my-task.md`)
@@ -110,6 +116,7 @@ repo checks out `019`'s branch and the new commits stack on top; the
 - **Multi-repo** — commits and reviews across all git repos in the parent directory
 - **Targeted diffs** — each review round sees exactly its own commit, not HEAD~1
 - **Plan-aware review** — reviewers and the fix agent both receive the plan text alongside the diff, so deliberate changes that match the plan are not flagged as regressions
+- **Persistent Claude coder sessions** — when the implementation provider is `claude`, Owl generates a per-plan Claude `session-id`, reuses it for later Claude fix rounds, and reloads it on resume so the coder keeps plan context across review cycles
 - **Deterministic test gate** — opt-in per repo via `OWL_TEST_CMD_<repo>`; Owl runs the command at the top of every review round and feeds failing output to the fix agent alongside LLM reviewer feedback, and refuses to LGTM-exit while any suite is red
 - **Stacked plans** — a plan can declare `base-branch:` in its frontmatter to start from another plan's branch instead of `main`, allowing dependent plans to queue before their parents are merged
 - **Low-priority queue** — plans marked `priority: low` always drain *after* every normal-priority plan in the same cycle (two-pass), so a cheap nice-to-have with a smaller numeric prefix never blocks higher-value work. `--skip-low-priority` bypasses them entirely during the day and overnight runs drain them.
@@ -123,9 +130,9 @@ Set env vars before starting `src/owl.sh`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OWL_IMPL_PROVIDER` | `claude` | Provider for plan execution: `claude` or `codex` |
-| `OWL_IMPL_MODEL` | `claude-sonnet-4-6` | Model for plan execution |
+| `OWL_IMPL_MODEL` | `claude-sonnet-4-6` | Model for plan execution. If provider is `claude`, Owl persists a per-plan Claude session and reuses it for later Claude fix rounds. |
 | `OWL_FIX_PROVIDER` | `OWL_IMPL_PROVIDER` | Provider for fix phase: `claude` or `codex` |
-| `OWL_FIX_MODEL` | `OWL_IMPL_MODEL` | Model for fix phase |
+| `OWL_FIX_MODEL` | `OWL_IMPL_MODEL` | Model for fix phase. If this is also `claude`, Owl reuses the coder's Claude session for fixes. |
 | `OWL_REVIEWER1_PROVIDER` | `codex` | Reviewer slot 1 provider: `claude`, `codex`, or `none` |
 | `OWL_REVIEWER1_MODEL` | `gpt-5.4` | Reviewer slot 1 model. Leave blank or set to `none` to disable the slot. |
 | `OWL_REVIEWER1_LABEL` | `Codex` | Reviewer slot 1 label in logs/output |
@@ -193,6 +200,23 @@ export OWL_REVIEWER1_MODEL=gpt-5.4
 export OWL_REVIEWER2_PROVIDER=claude
 export OWL_REVIEWER2_MODEL=claude-sonnet-4-6
 ```
+
+Example: Claude Opus coder/fixer, one ChatGPT reviewer, second reviewer disabled:
+
+```bash
+export OWL_IMPL_PROVIDER=claude
+export OWL_IMPL_MODEL=claude-opus-4-6
+export OWL_FIX_PROVIDER=claude
+export OWL_FIX_MODEL=claude-opus-4-6
+export OWL_REVIEWER1_PROVIDER=codex
+export OWL_REVIEWER1_MODEL=gpt-5.4
+export OWL_REVIEWER2_PROVIDER=none
+export OWL_REVIEWER2_MODEL=none
+```
+
+This Claude-as-coder setup is the recommended default when available, because
+the coder session is reused across fix rounds and resumes cleanly after Owl
+restarts.
 
 ## Requirements
 

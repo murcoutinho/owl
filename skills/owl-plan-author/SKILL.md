@@ -57,6 +57,8 @@ base-branch: owl/021-some-earlier-plan
 - Use `2` (or omit) for default-size plans.
 - Use `3` for large multi-repo refactors with significant risk.
 
+Note: Owl's actual reviewer count is controlled by local config, not by the plan file. Reviewer slots can now be disabled by setting their provider to `none` or leaving the model blank / setting it to `none` in Owl's private `.env.local`.
+
 **`priority: low`** — marks as low-priority. Each cycle drains normal-priority plans in filename order first, then low-priority plans in filename order — so a `priority: low` plan with a smaller numeric prefix will still run *after* every normal plan, not before. With `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`), these plans are bypassed entirely on every cycle and only drain when the flag is dropped. Use for nice-to-haves that shouldn't compete with active work.
 
 **`base-branch: <branch-name>`** — start from this branch instead of `main`. See *Step 3b* below for the complete wiring rules; they are non-obvious enough to deserve their own step.
@@ -159,6 +161,8 @@ What you DO need to do: list the same (or a superset of) commands in this
 Verification section so human reviewers can reproduce them locally, and make
 sure any new code paths the plan introduces are covered by tests that the
 gate will actually exercise.
+
+If the implementation/fix provider is Claude, Owl now reuses a per-plan Claude session across coder/fix rounds. That means plans benefit from keeping one coherent coding thread, while reviewers remain independent. You do not need to mention this in the plan body, but keep plans self-contained anyway because reviewers still see only the plan text plus the diffs.
 
 ### 8. Risks and known limitations
 Edge cases, migration concerns, things intentionally left out that might surface during review.
