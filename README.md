@@ -8,7 +8,7 @@
 
 **Want to spend your tokens while you sleep?** Owl is an autonomous dev agent that works through your plan queue overnight — writing code, running multi-model review rounds, and opening PRs across one or more sibling repos. Drop a markdown plan into `plan/`, start Owl, and wake up to reviewed pull requests ready to merge.
 
-Owl orchestrates Claude and Codex side by side so implementation, fixes, and reviews each use the strongest model for the job. It stacks dependent plans, gates PRs behind your own deterministic test commands, resumes cleanly after rate limits, and keeps a full work log for every run.
+Owl orchestrates Claude, Codex, or both so implementation, fixes, and reviews each use your preferred model for the job. It stacks dependent plans, gates PRs behind your own deterministic test commands, resumes cleanly after rate limits, and keeps a full work log for every run.
 
 ## How it works
 
