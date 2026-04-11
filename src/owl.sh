@@ -301,11 +301,17 @@ run_llm() {
   provider="$(normalize_provider "$1")"
   local model="$2"
   local prompt_file="$3"
+  local session_id="${4:-}"
 
   case "$provider" in
     claude)
-      # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
-      retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      if [ -n "$session_id" ]; then
+        # shellcheck disable=SC2016 # $1/$2/$3 are positional args to the inner bash -c subshell
+        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+      else
+        # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
+        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      fi
       ;;
     codex)
       # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
@@ -320,6 +326,29 @@ run_llm() {
       return 1
       ;;
   esac
+}
+
+get_or_create_claude_coder_session_id() {
+  local plan_work_dir="$1"
+  local session_file="$plan_work_dir/coder_claude_session_id"
+
+  if [ -f "$session_file" ]; then
+    head -n 1 "$session_file"
+    return 0
+  fi
+
+  local session_id
+  session_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  printf '%s\n' "$session_id" > "$session_file"
+  echo "$session_id"
+}
+
+load_claude_coder_session_id() {
+  local plan_work_dir="$1"
+  local session_file="$plan_work_dir/coder_claude_session_id"
+  if [ -f "$session_file" ]; then
+    head -n 1 "$session_file"
+  fi
 }
 
 acquire_lock() {
@@ -586,6 +615,11 @@ execute_plan() {
   fi
 
   local branch_name="owl/${plan_name%.md}"
+  local coder_claude_session_id=""
+  if [ "$(normalize_provider "$IMPL_PROVIDER")" = "claude" ]; then
+    coder_claude_session_id="$(get_or_create_claude_coder_session_id "$plan_work_dir")"
+    log "Using persistent Claude coder session: $coder_claude_session_id"
+  fi
 
   # ── Step 2: Reset to base branch (or main) & pull ──
   reset_all_repos_to_base "$plan_base_branch"
@@ -626,7 +660,7 @@ IMPORTANT INSTRUCTIONS:
 - The agent handles all git operations.
 PLANEOF
 
-  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file"
+  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file" "$coder_claude_session_id"
   local exit_code=$?
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
@@ -733,6 +767,8 @@ run_review_loop() {
   local plan_file="$1"
   local plan_name="$2"
   local plan_work_dir="$3"
+  local coder_claude_session_id=""
+  coder_claude_session_id="$(load_claude_coder_session_id "$plan_work_dir")"
 
   # Load the plan so reviewers and the fix agent can see the author's intent.
   # Without this, reviewers flag deliberate changes as regressions because they
@@ -991,7 +1027,12 @@ FIXEOF
 
     log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
     local fix_rc=0
-    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" || fix_rc=$?
+    local fix_session_id=""
+    if [ "$(normalize_provider "$FIX_PROVIDER")" = "claude" ] && [ -n "$coder_claude_session_id" ]; then
+      fix_session_id="$coder_claude_session_id"
+      log "Reusing Claude coder session for fixes: $fix_session_id"
+    fi
+    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" "$fix_session_id" || fix_rc=$?
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
     if [ "$fix_rc" -ne 0 ]; then
       # Same as the reviewer abort: surface the last non-empty output line so
