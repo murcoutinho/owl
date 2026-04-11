@@ -179,7 +179,7 @@ Alternative (copy — snapshot, won't track future edits):
 
 ```sh
 mkdir -p ~/.claude/skills/owl-plan-author
-cp owl/skills/owl-plan-author/SKILL.md ~/.claude/skills/owl-plan-author/SKILL.md
+cp /Users/lanabarreto/Documents/Murilo/owl/skills/owl-plan-author/SKILL.md ~/.claude/skills/owl-plan-author/SKILL.md
 ```
 
 After installing, **restart Claude Code** to pick up the skill (skills are scanned at session start and don't hot-reload).
