@@ -163,6 +163,27 @@ equivalent. A typical workflow: run with `--skip-low-priority` during the
 day while you iterate on high-value work, then restart without the flag at
 night so the queued low-priority plans drain overnight.
 
+## Using the plan-authoring skill
+
+A Claude Code skill at `owl/skills/owl-plan-author/SKILL.md` walks Claude through every step of drafting a new Owl plan — numbering, structure, anchoring, frontmatter, and queue hygiene. It auto-activates when you say things like "queue an Owl plan" or "add this to the Owl queue".
+
+**Install (one-time, run after cloning or pulling this change):**
+
+```sh
+# Symlink — future edits to the repo file propagate automatically (recommended)
+mkdir -p ~/.claude/skills
+ln -s /Users/user/path/to/projects/owl/skills/owl-plan-author ~/.claude/skills/owl-plan-author
+```
+
+Alternative (copy — snapshot, won't track future edits):
+
+```sh
+mkdir -p ~/.claude/skills/owl-plan-author
+cp owl/skills/owl-plan-author/SKILL.md ~/.claude/skills/owl-plan-author/SKILL.md
+```
+
+After installing, **restart Claude Code** to pick up the skill (skills are scanned at session start and don't hot-reload).
+
 ## Notes
 
 - Claude-backed roles use `claude --dangerously-skip-permissions` — review plans before enabling them
