@@ -24,8 +24,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOCK_FILE="$SCRIPT_DIR/../.agent.lock"
 
 # Optional local machine-specific config. Keep instance details like
-# repository names out of the tracked repo.
-if [ -f "$SCRIPT_DIR/../.env.local" ]; then
+# repository names out of the tracked repo. Tests set OWL_SKIP_ENV_LOCAL=1
+# before sourcing so their fixture env isn't clobbered by whatever the
+# developer happens to have configured for real runs.
+if [ "${OWL_SKIP_ENV_LOCAL:-0}" != "1" ] && [ -f "$SCRIPT_DIR/../.env.local" ]; then
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/../.env.local"
 fi
@@ -54,12 +56,10 @@ REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
 # Target repos (space-separated directory names under PROJECT_DIR)
 # Only these repos will be managed by Owl. Must be set via environment or the
-# ignored .env.local file next to this script.
+# ignored .env.local file next to this script. The hard-exit if this is unset
+# is deferred until after CLI parsing so --help, --doctor, and --validate can
+# run without requiring a full config (useful for first-time setup).
 TARGET_REPOS="${OWL_TARGET_REPOS:-}"
-if [ -z "$TARGET_REPOS" ]; then
-  echo "OWL_TARGET_REPOS is not set. Configure it in the environment or in .env.local." >&2
-  exit 2
-fi
 
 # Low-priority plans are skipped when this is "1". Default: include everything.
 # Controlled by env var OWL_SKIP_LOW_PRIORITY or the CLI flag --skip-low-priority.
@@ -70,6 +70,10 @@ SKIP_LOW_PRIORITY="${OWL_SKIP_LOW_PRIORITY:-0}"
 # When set to a non-empty path, owl runs validate_plan() and exits without
 # acquiring the lock or entering the main loop. Set by --validate <path>.
 VALIDATE_PLAN_FILE=""
+
+# When set to 1, owl runs run_doctor() and exits without acquiring the lock
+# or entering the main loop. Set by --doctor.
+DOCTOR_MODE=0
 
 # Parse CLI args.
 while [ "$#" -gt 0 ]; do
@@ -90,9 +94,14 @@ while [ "$#" -gt 0 ]; do
       VALIDATE_PLAN_FILE="$2"
       shift 2
       ;;
+    --doctor)
+      DOCTOR_MODE=1
+      shift
+      ;;
     -h|--help)
       cat <<'HELPEOF'
-Usage: owl.sh [--skip-low-priority] [--include-low-priority] [--validate <plan>]
+Usage: owl.sh [--skip-low-priority] [--include-low-priority]
+              [--validate <plan>] [--doctor]
 
   --skip-low-priority     Skip plans whose frontmatter has `priority: low`.
                           Also honored via env var OWL_SKIP_LOW_PRIORITY=1.
@@ -101,6 +110,9 @@ Usage: owl.sh [--skip-low-priority] [--include-low-priority] [--validate <plan>]
   --validate <plan>       Parse <plan> and print what the agent would do
                           without calling any LLM or touching git. Exits 0
                           on success; does not acquire the lock file.
+  --doctor                Check that required CLIs, credentials, and target
+                          repos are in place. Does not call any LLM or touch
+                          git. Run this first on a new machine.
   -h, --help              Show this help.
 
 All other configuration is via environment variables -- see README.
@@ -114,6 +126,15 @@ HELPEOF
       ;;
   esac
 done
+
+# Now enforce OWL_TARGET_REPOS for the real-run path. --validate and --doctor
+# both need to work without a configured queue so first-time users can debug
+# their setup; everything else requires it.
+if [ -z "$TARGET_REPOS" ] && [ -z "$VALIDATE_PLAN_FILE" ] && [ "$DOCTOR_MODE" != "1" ]; then
+  echo "OWL_TARGET_REPOS is not set. Configure it in the environment or in .env.local." >&2
+  echo "Run './src/owl.sh --doctor' to diagnose your setup." >&2
+  exit 2
+fi
 
 # List .git dirs for target repos only (null-delimited, compatible with existing loops)
 find_target_repos() {
@@ -1379,12 +1400,133 @@ validate_plan() {
   return 0
 }
 
+# ─── Doctor (preflight environment check) ───
+# Invoked when --doctor is passed. Verifies that the CLIs required by the
+# configured providers are installed, that `gh` is authed for PR creation,
+# and that every repo in OWL_TARGET_REPOS actually exists next to owl/.
+# Does NOT call any LLM, run git, or acquire the lock file. Designed to be
+# the first thing a new user runs on a fresh machine.
+run_doctor() {
+  local problems=0
+  local warnings=0
+
+  echo "Owl doctor -- checking environment"
+  echo "  PROJECT_DIR : $PROJECT_DIR"
+  echo "  PLAN_DIR    : $PLAN_DIR"
+  echo ""
+
+  # ── 1. Provider CLIs ──
+  # Only check for the CLIs the configured roles actually use. A user who only
+  # runs Claude shouldn't be scolded about a missing codex binary.
+  local need_claude=false need_codex=false
+  local role
+  for role in "$IMPL_PROVIDER" "$FIX_PROVIDER" "$REVIEWER1_PROVIDER" "$REVIEWER2_PROVIDER"; do
+    case "$role" in
+      claude) need_claude=true ;;
+      codex)  need_codex=true ;;
+    esac
+  done
+
+  echo "Provider CLIs:"
+  if $need_claude; then
+    if command -v claude >/dev/null 2>&1; then
+      echo "  ok    claude        ($(command -v claude))"
+    else
+      echo "  FAIL  claude        not found on PATH -- required by a configured role"
+      problems=$((problems + 1))
+    fi
+  else
+    echo "  skip  claude        (no role configured to use it)"
+  fi
+  if $need_codex; then
+    if command -v codex >/dev/null 2>&1; then
+      echo "  ok    codex         ($(command -v codex))"
+    else
+      echo "  FAIL  codex         not found on PATH -- required by a configured role"
+      problems=$((problems + 1))
+    fi
+  else
+    echo "  skip  codex         (no role configured to use it)"
+  fi
+  echo ""
+
+  # ── 2. gh CLI + auth (always required for PR creation) ──
+  echo "GitHub CLI:"
+  if command -v gh >/dev/null 2>&1; then
+    echo "  ok    gh            ($(command -v gh))"
+    if gh auth status >/dev/null 2>&1; then
+      echo "  ok    gh auth       authenticated"
+    else
+      echo "  FAIL  gh auth       not authenticated -- run 'gh auth login'"
+      problems=$((problems + 1))
+    fi
+  else
+    echo "  FAIL  gh            not found on PATH -- required for 'gh pr create'"
+    problems=$((problems + 1))
+  fi
+  echo ""
+
+  # ── 3. OWL_TARGET_REPOS + per-repo existence check ──
+  echo "Target repos:"
+  if [ -z "$TARGET_REPOS" ]; then
+    echo "  FAIL  OWL_TARGET_REPOS is not set"
+    echo "        Set it in .env.local next to src/owl.sh, e.g.:"
+    echo "        OWL_TARGET_REPOS=\"my-repo other-repo\""
+    problems=$((problems + 1))
+  else
+    echo "  ok    OWL_TARGET_REPOS=\"$TARGET_REPOS\""
+    local repo_name repo_path
+    for repo_name in $TARGET_REPOS; do
+      repo_path="$PROJECT_DIR/$repo_name"
+      if [ -d "$repo_path/.git" ]; then
+        echo "    ok  $repo_name -> $repo_path"
+      else
+        echo "    FAIL $repo_name: $repo_path is not a git repo"
+        echo "         (expected a sibling of the owl/ checkout)"
+        problems=$((problems + 1))
+      fi
+    done
+  fi
+  echo ""
+
+  # ── 4. Plan directory ──
+  echo "Plan directory:"
+  if [ -d "$PLAN_DIR" ]; then
+    local pending
+    pending=$(find "$PLAN_DIR" -maxdepth 1 -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    echo "  ok    $PLAN_DIR ($pending plan(s) queued)"
+  else
+    echo "  warn  $PLAN_DIR does not exist -- create it or drop a plan in"
+    echo "        'cp examples/001-touch-readme.md plan/' gets you a working sample"
+    warnings=$((warnings + 1))
+  fi
+  echo ""
+
+  # ── Summary ──
+  echo "========================================="
+  if [ "$problems" -eq 0 ]; then
+    if [ "$warnings" -eq 0 ]; then
+      echo "All checks passed. Ready to run ./src/owl.sh"
+    else
+      echo "All required checks passed ($warnings warning(s)). Ready to run ./src/owl.sh"
+    fi
+    return 0
+  fi
+  echo "$problems problem(s), $warnings warning(s). Fix the FAILs above, then re-run --doctor."
+  return 1
+}
+
 # ─── Main ───
 # Guarded so tests can source this file to exercise individual functions
 # without running the lock/loop. Matches the Python `if __name__ == "__main__"`
 # idiom: when executed directly, $0 equals ${BASH_SOURCE[0]}; when sourced,
 # they differ.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "$DOCTOR_MODE" = "1" ]; then
+    run_doctor
+    exit $?
+  fi
+
   if [ -n "$VALIDATE_PLAN_FILE" ]; then
     validate_plan
     exit $?
