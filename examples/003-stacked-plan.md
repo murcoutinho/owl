@@ -31,10 +31,10 @@ Example behavior:
 
 ```python
 truncate("hello world foo bar", 12, word_boundary=True)
-# -> "hello world..."   (cut at space before "foo", not mid-word)
+# -> "hello..."   (9-char budget: last space before index 9 is at 5, so "hello" + "...")
 
 truncate("hello world foo bar", 12, word_boundary=False)
-# -> "hello world ..."  (default: cut at exactly max_length - len(suffix))
+# -> "hello wor..."  (text[:9] + "...", total 12 chars)
 ```
 
 Add tests in `tests/test_text.py` covering:
