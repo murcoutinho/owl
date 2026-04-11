@@ -53,9 +53,15 @@ setup_fake_project() {
 # Callers still need to set PLAN_WORK_DIR / LOG_FILE to whatever temp
 # paths they want to inspect.
 source_owl() {
+  # Skip .env.local so tests aren't at the mercy of the developer's local
+  # config (OWL_REVIEWER2_PROVIDER=none in .env.local was silently disabling
+  # slot 2 in tests that explicitly exported it as claude).
+  export OWL_SKIP_ENV_LOCAL=1
+
   local fake_target_repos="${OWL_TARGET_REPOS:-}"
   # shellcheck disable=SC1090
   . "$OWL_SCRIPT"
+
   # Re-point the script at the fixture. These variables were computed at
   # source time from the real parent directory — reassigning them is
   # necessary so find_target_repos enumerates the fake repos.

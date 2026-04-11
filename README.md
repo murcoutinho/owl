@@ -17,14 +17,37 @@ Owl orchestrates Claude, Codex, or both so implementation, fixes, and reviews ea
 3. Owl picks the next eligible plan, resets target repos to the right base, executes the plan, commits changes, runs review rounds, applies fixes, pushes branches, and opens PRs.
 4. Owl writes a done file with the execution summary.
 
+## Quick start
+
+```bash
+# 1. Clone owl next to the repo(s) you want it to work on
+git clone https://github.com/YOUR_ORG/owl.git
+cd owl
+
+# 2. Verify your environment (checks for claude/codex/gh and config)
+./src/owl.sh --doctor
+
+# 3. Copy a sample plan into the queue
+cp examples/001-touch-readme.md plan/
+
+# 4. Point owl at a sandbox repo and start it
+export OWL_TARGET_REPOS=my-sandbox-repo
+./src/owl.sh
+```
+
+See [`examples/`](examples/) for three runnable sample plans, including a
+stacked-PR example that uses `base-branch` frontmatter.
+
 ## Repo layout
 
 ```text
 owl/
 ├── src/owl.sh
-├── plan/
+├── plan/                       # your plan queue (gitignored)
 │   └── done/
-├── skills/owl-plan-author/SKILL.md
+├── examples/                   # sample plans you can copy into plan/
+├── skills/owl-plan-author/     # skill for agents drafting new plans
+├── tests/                      # bash test suite for owl.sh
 └── README.md
 ```
 
@@ -130,14 +153,16 @@ OWL_TEST_CMD_project-api_mobile="npm test --silent"
 ## Usage
 
 ```bash
-./src/owl.sh
-./src/owl.sh --skip-low-priority
-./src/owl.sh --validate plan/001-my-task.md
+./src/owl.sh --doctor                        # verify CLIs, auth, target repos
+./src/owl.sh                                  # poll plan/ and run the queue
+./src/owl.sh --skip-low-priority              # daytime mode: defer priority: low
+./src/owl.sh --validate plan/001-my-task.md   # dry-parse a plan, no LLM calls
 tail -f agent.log
 ```
 
 Notes:
 
+- `--doctor` does not call any LLM or touch git. Run it first on a new machine.
 - `--skip-low-priority` only skips plans with `priority: low`.
 - `--validate` does not call any model or touch git.
 - If a repo already has local changes, Owl aborts before calling the coder.
@@ -152,11 +177,24 @@ Notes:
 
 ## Skill
 
-The repo includes a plan-authoring skill at [skills/owl-plan-author/SKILL.md](/Users/user/path/to/projects/owl/skills/owl-plan-author/SKILL.md). Use it when you want an agent to draft a new Owl plan with the right numbering, frontmatter, and queue hygiene.
+The repo includes a plan-authoring skill at [`skills/owl-plan-author/SKILL.md`](skills/owl-plan-author/SKILL.md). Use it when you want an agent to draft a new Owl plan with the right numbering, frontmatter, and queue hygiene.
+
+## Contributing
+
+Bug reports, test cases, and new provider integrations are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the test suite, shellcheck expectations, and the kind of changes most likely to land.
 
 ## Security
 
-Owl runs `claude --dangerously-skip-permissions` and `codex exec --full-auto --skip-git-repo-check`, then commits and pushes branches without prompting between steps. Point it only at repositories you own and trust, and review every PR it opens before merging.
+Owl invokes its provider CLIs with their "unattended" flags — `claude --dangerously-skip-permissions` and `codex exec --full-auto --skip-git-repo-check` — and commits and pushes branches without prompting between steps. That's the whole value proposition: the agent has to run while you sleep, and every prompt it hits mid-run is a prompt you have to wake up to answer.
+
+The isolation model is deliberately simple:
+
+- **Scope is fenced at the repo layer.** Owl only touches directories listed in `OWL_TARGET_REPOS` that sit next to the `owl/` checkout. Everything outside that set is invisible to the agent.
+- **Humans still gate merges.** Owl opens pull requests — it does not merge them. Branch protection on your target repos is the last line of defense and should stay on.
+- **`OWL_TEST_CMD_<repo>` runs arbitrary shell.** Only set it from trusted `.env.local` config, never from plan content or LLM output.
+- **The plan queue is trusted input.** Anyone who can write to `plan/` can direct the agent. Treat `plan/` the same way you treat your shell history or `~/.ssh/config`.
+
+Use Owl on repositories you own or are authorized to change, run it against a branch-protected target, and review every PR before merging. If you are not comfortable with an autonomous process pushing branches on your behalf, this is not the tool for you.
 
 ## License
 
