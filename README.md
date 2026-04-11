@@ -99,7 +99,7 @@ repo checks out `019`'s branch and the new commits stack on top; the
 ## Features
 
 - **Rate limit resilience** — retries every 10 minutes on 429/overloaded, up to ~8 hours
-- **Resume on crash** — pending reviews survive restarts via state files
+- **Resume on crash or mid-review abort** — pending plans survive restarts and unrecoverable LLM failures; if a reviewer or the fix agent gives up after `MAX_RETRIES` rate-limited attempts, Owl persists a `pending_status` file (plan, branch, failed iteration, reason) and resumes the plan before picking up anything new on the next cycle. Prevents silently marking a plan "done" with zero successful review rounds.
 - **Multi-repo** — commits and reviews across all git repos in the parent directory
 - **Targeted diffs** — each review round sees exactly its own commit, not HEAD~1
 - **Plan-aware review** — reviewers and the fix agent both receive the plan text alongside the diff, so deliberate changes that match the plan are not flagged as regressions
@@ -266,7 +266,7 @@ After installing, **restart Claude Code** to pick up the skill (skills are scann
 - Claude-backed roles use `claude --dangerously-skip-permissions` — review plans before enabling them
 - Codex-backed roles use `codex exec --full-auto --skip-git-repo-check`
 - All logs go to `agent.log`
-- Work directories (`.work/`) contain per-plan execution logs, review files, and commit manifests
+- Work directories (`.work/`) contain per-plan execution logs, review files, and commit manifests. When a plan aborts mid-review, a `pending_status` file is written with the failed iteration, branch name, and reason so the next cycle can resume it cleanly.
 
 ## License
 

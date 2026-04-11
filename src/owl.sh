@@ -703,7 +703,9 @@ PLANEOF
   echo "$branch_name" > "$plan_work_dir/branch"
 
   # ── Step 6: Review loop ──
-  run_review_loop "$plan_file" "$plan_name" "$plan_work_dir"
+  # Propagate non-zero so check_plans stops this cycle and next cycle resumes
+  # the pending plan before picking up anything new.
+  run_review_loop "$plan_file" "$plan_name" "$plan_work_dir" || return $?
 }
 
 # ─── Review loop ───
@@ -755,6 +757,14 @@ run_review_loop() {
 
   local review_rounds_completed=$reviews_done
   local reviews_skipped=0
+
+  # Tracks unrecoverable LLM failures (reviewer or fix rate-limited past
+  # MAX_RETRIES). When set, the loop breaks and we bail out of the plan
+  # without writing the done file or deleting the pending marker, so the
+  # next owl cycle resumes this plan before picking up new ones.
+  local had_unrecoverable_llm_failure=false
+  local abort_reason=""
+  local abort_iteration=0
 
   for i in $(seq $((reviews_done + 1)) "$review_iterations"); do
     log "-----------------------------------------"
@@ -884,9 +894,11 @@ run_review_loop() {
     fi
 
     if ! $reviewer1_ok && ! $reviewer2_ok; then
-      log "All enabled reviewers failed. Skipping fix phase for iteration $i."
-      reviews_skipped=$((reviews_skipped + 1))
-      continue
+      log "All enabled reviewers failed for iteration $i (likely unrecoverable rate limit after $MAX_RETRIES retries)."
+      had_unrecoverable_llm_failure=true
+      abort_reason="all reviewers failed (likely rate-limited)"
+      abort_iteration=$i
+      break
     fi
 
     local reviewer1_review=""
@@ -950,8 +962,16 @@ $combined_review
 FIXEOF
 
     log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
-    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file"
+    local fix_rc=0
+    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" || fix_rc=$?
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
+    if [ "$fix_rc" -ne 0 ]; then
+      log "Fix LLM failed for iteration $i (exit=$fix_rc, likely unrecoverable rate limit after $MAX_RETRIES retries)."
+      had_unrecoverable_llm_failure=true
+      abort_reason="fix LLM failed (likely rate-limited)"
+      abort_iteration=$i
+      break
+    fi
 
     # Commit fixes in repos on the branch that have changes
     local next_manifest="$plan_work_dir/review_input_$((i + 1)).tsv"
@@ -992,6 +1012,40 @@ FIXEOF
     review_rounds_completed=$i
     echo "reviews_done=$i" > "$plan_work_dir/state"
   done
+
+  # ── Unrecoverable LLM failure? Bail out, keep pending for next cycle. ──
+  if $had_unrecoverable_llm_failure; then
+    local reviews_done_now=0
+    if [ -f "$plan_work_dir/state" ]; then
+      reviews_done_now=$(sed -n 's/^reviews_done=\([0-9]*\)$/\1/p' "$plan_work_dir/state" 2>/dev/null || echo 0)
+      reviews_done_now=${reviews_done_now:-0}
+    fi
+
+    log "========================================="
+    log "Plan '$plan_name' aborted mid-review."
+    log "  reason:              $abort_reason"
+    log "  failed at iteration: $abort_iteration / $review_iterations"
+    log "  reviews completed:   $reviews_done_now"
+    log "  branch:              $branch_name"
+    log "Pending marker preserved — next owl cycle will resume this plan before picking up new ones."
+    log "========================================="
+
+    {
+      echo "plan_name=$plan_name"
+      echo "plan_file=$plan_file"
+      echo "branch_name=$branch_name"
+      echo "failed_iteration=$abort_iteration"
+      echo "total_iterations=$review_iterations"
+      echo "reviews_done=$reviews_done_now"
+      echo "reason=$abort_reason"
+      echo "aborted_at=$(date '+%Y-%m-%d %H:%M:%S')"
+    } > "$plan_work_dir/pending_status"
+
+    # Switch back to main so the operator's working tree isn't stuck on the
+    # plan's branch while the next cycle waits.
+    switch_all_to_main
+    return 1
+  fi
 
   # ── Step 7: Push and open PRs ──
   local reviews_successful=$(( review_rounds_completed > reviews_skipped ? review_rounds_completed - reviews_skipped : 0 ))
@@ -1076,9 +1130,28 @@ resume_pending_reviews() {
       continue
     fi
 
-    log "Resuming pending review for: $plan_name"
-    run_review_loop "$plan_file" "$plan_name" "$plan_work_dir"
+    if [ -f "$plan_work_dir/pending_status" ]; then
+      log "Resuming pending review for: $plan_name (previously aborted mid-review)"
+      while IFS= read -r status_line; do
+        [ -n "$status_line" ] && log "  $status_line"
+      done < "$plan_work_dir/pending_status"
+      # Clear the prior status; run_review_loop will write a fresh one if it
+      # aborts again this cycle.
+      rm -f "$plan_work_dir/pending_status"
+    else
+      log "Resuming pending review for: $plan_name"
+    fi
+
+    local rrl_rc=0
+    run_review_loop "$plan_file" "$plan_name" "$plan_work_dir" || rrl_rc=$?
     resumed=true
+
+    # If resume aborted again (rate limits still biting), stop the cycle
+    # instead of hammering every pending plan with the same failure.
+    if [ "$rrl_rc" -ne 0 ] || [ -f "$plan_work_dir/pending_status" ]; then
+      log "Plan '$plan_name' still pending after resume attempt. Stopping cycle; will retry next cycle."
+      return 0
+    fi
   done
   if $resumed; then return 0; else return 1; fi
 }
