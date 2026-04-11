@@ -9,5 +9,8 @@ agent.log
 # Lock file
 .agent.lock
 
+# Local machine-specific config
+.env.local
+
 # OS
 .DS_Store
