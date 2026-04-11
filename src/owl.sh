@@ -47,7 +47,7 @@ REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 
 # Target repos (space-separated directory names under PROJECT_DIR)
 # Only these repos will be managed by Owl. Set via OWL_TARGET_REPOS env var.
-TARGET_REPOS="${OWL_TARGET_REPOS:-saudade saudade-mobile}"
+TARGET_REPOS="${OWL_TARGET_REPOS:-owl saudade saudade-mobile}"
 
 # Low-priority plans are skipped when this is "1". Default: include everything.
 # Controlled by env var OWL_SKIP_LOW_PRIORITY or the CLI flag --skip-low-priority.
