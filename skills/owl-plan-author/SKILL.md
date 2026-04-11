@@ -59,7 +59,63 @@ base-branch: owl/021-some-earlier-plan
 
 **`priority: low`** — marks as low-priority. Each cycle drains normal-priority plans in filename order first, then low-priority plans in filename order — so a `priority: low` plan with a smaller numeric prefix will still run *after* every normal plan, not before. With `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`), these plans are bypassed entirely on every cycle and only drain when the flag is dropped. Use for nice-to-haves that shouldn't compete with active work.
 
-**`base-branch: <branch-name>`** — start from this branch instead of `main`. Use when this plan depends on code from another plan that is still queued or in-flight. If the named branch has already merged and been deleted on origin, Owl silently falls back to `main`.
+**`base-branch: <branch-name>`** — start from this branch instead of `main`. See *Step 3b* below for the complete wiring rules; they are non-obvious enough to deserve their own step.
+
+---
+
+## Step 3b — Wiring plan dependencies with `base-branch`
+
+`base-branch` is the only way to tell Owl "this plan depends on code that another queued/in-flight plan introduces." Getting it right matters — the wrong value silently corrupts the dependent plan's starting state.
+
+### When to use it (and when NOT to)
+
+Use `base-branch` **only** when this plan has a **true code dependency** on another queued or in-flight plan — a symbol it needs to import, a file that must exist, a type it references, a config change another plan ships. If the dependent plan would fail to compile/run without the ancestor plan's code, that is a true dependency and deserves `base-branch`.
+
+Do NOT use `base-branch` just because two plans edit the same file. Non-overlapping edits to the same file merge cleanly via normal git; adding a chain there only creates rigidity. Reserve chains for genuine code dependencies.
+
+### Branch name convention
+
+Owl derives branch names from plan filenames with the pattern `owl/<plan-filename-without-.md>`. So plan `031-mobile-extract-and-test-chat-db-row-mapping.md` lives on branch `owl/031-mobile-extract-and-test-chat-db-row-mapping`. Always use the full branch name in the frontmatter — no abbreviations.
+
+```markdown
+---
+base-branch: owl/031-mobile-extract-and-test-chat-db-row-mapping
+---
+```
+
+### Priority rule — low plans cannot depend on normal plans
+
+**A `priority: low` plan MUST NOT declare a `base-branch:` that points at a normal-priority plan.**
+
+Reason: normal-priority plans drain first on every cycle. A normal-priority ancestor will merge (and its branch will auto-delete on origin) long before the low-priority dependent is eligible to run — especially with `--skip-low-priority`, where low plans can sit in the queue for days. By the time the low plan runs, its declared base branch is long gone. Owl's stale-ref fallback will kick in and run the plan against `main`, which usually works but makes the dependency implicit and fragile.
+
+If you genuinely need a chain that crosses this boundary, **either:**
+- **Demote the ancestor** to `priority: low` so they drain together in filename order. This is the usual fix for refactor chains. Test-coverage plans, schema splits, and related organization work typically all belong in the low-priority band together.
+- **Or drop the base-branch entirely** and add a plain-English gate in the plan body ("This plan requires plan NNN's changes to already be on main. If `lib/foo.ts` does not exist, STOP and wait for NNN to merge first."). Use this when you cannot demote the ancestor for a good reason.
+
+Normal plans can freely depend on normal plans. Low plans can depend on low plans. Never mix the priorities inside a chain.
+
+### Transitive chains: always stack on the immediate predecessor
+
+If plan C depends on B, and B depends on A, then:
+- A's frontmatter has no `base-branch:` (it descends from `main`).
+- B's frontmatter has `base-branch: owl/<A>`.
+- C's frontmatter has `base-branch: owl/<B>` — **not** `base-branch: owl/<A>`.
+
+Always point at the **immediate** predecessor, not the original ancestor. Git will transitively carry A's content through B into C's working tree. Skipping B and pointing C at A would bypass B's changes entirely when Owl sets up C's workspace.
+
+### Fallback behavior and caveats
+
+If the named base branch has already merged and been deleted on origin by the time the dependent plan runs, Owl silently falls back to `main`. This works correctly under the assumption that the ancestor's code was merged into `main` — which it is, for any normal merge flow. The dependent plan runs on `main` and never knows anything happened.
+
+One subtlety: Owl treats "branch not on origin right now" as the fallback trigger. A branch that is still open on origin (merged but not deleted, or still under review) will be used as-is. If the ancestor's branch is merged-but-not-deleted, Owl will stack the dependent on the stale merged tip — that is the whole point of `base-branch` and is correct behavior, but the resulting PR shows a diff against the ancestor branch instead of `main`, which can look odd in review. Do not worry about this unless a reviewer asks.
+
+### Common mistakes
+
+1. **Skipping the wiring entirely** because "they run in filename order anyway." Queue order is not a dependency contract. If the ancestor fails or stalls, the dependent will run on a base that does not contain the expected code and will fail in a confusing way. Declare dependencies explicitly.
+2. **Chaining low onto normal.** See the priority rule above.
+3. **Pointing at the original ancestor in a chain instead of the immediate predecessor.** See the transitive chains rule.
+4. **Using `base-branch` for every same-file edit.** Only for true code dependencies.
 
 ---
 
