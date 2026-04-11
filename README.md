@@ -1,10 +1,18 @@
 # Owl
 
+![shellcheck](https://github.com/YOUR_ORG/owl/actions/workflows/shellcheck.yml/badge.svg)
+
 <p align="center">
   <img src="owl.png" width="400" alt="Owl — autonomous dev agent" />
 </p>
 
 An autonomous dev agent that executes plans using Claude Code and/or Codex, with built-in review cycles.
+
+> **⚠️ Security notice.** Owl runs `claude --dangerously-skip-permissions`
+> and `codex --full-auto --skip-git-repo-check` against your code, then
+> commits and pushes branches to GitHub. Use it only in repositories you
+> trust and have reviewed, and make sure your providers' scopes match what
+> you are comfortable letting an agent do. Review every PR before merging.
 
 ## How It Works
 
@@ -151,6 +159,9 @@ export OWL_REVIEWER2_MODEL=claude-sonnet-4-6
 # Start with low-priority plans skipped (daytime token-saving mode)
 ./src/owl.sh --skip-low-priority
 
+# Dry-run: parse a plan and print what the agent would do (no LLM calls, no git)
+./src/owl.sh --validate plan/001-my-task.md
+
 # Watch progress
 tail -f agent.log
 
@@ -163,23 +174,45 @@ equivalent. A typical workflow: run with `--skip-low-priority` during the
 day while you iterate on high-value work, then restart without the flag at
 night so the queued low-priority plans drain overnight.
 
+### `--validate` output example
+
+```
+$ OWL_TARGET_REPOS=myrepo ./src/owl.sh --validate plan/042-add-login.md
+Plan file: /path/to/owl/plan/042-add-login.md
+
+Frontmatter:
+  review-rounds : 2
+  priority      : normal
+  base-branch   : (none)
+
+Target branch: owl/042-add-login
+
+Target repos:
+  - myrepo (/path/to/myrepo)
+
+validation OK -- run without --validate to execute
+```
+
+`--validate` never acquires the lock, so it can run safely while the agent is
+already running.
+
 ## Using the plan-authoring skill
 
-A Claude Code skill at `owl/skills/owl-plan-author/SKILL.md` walks Claude through every step of drafting a new Owl plan — numbering, structure, anchoring, frontmatter, and queue hygiene. It auto-activates when you say things like "queue an Owl plan" or "add this to the Owl queue".
+A Claude Code skill at `skills/owl-plan-author/SKILL.md` walks Claude through every step of drafting a new Owl plan — numbering, structure, anchoring, frontmatter, and queue hygiene. It auto-activates when you say things like "queue an Owl plan" or "add this to the Owl queue".
 
 **Install (one-time, run after cloning or pulling this change):**
 
 ```sh
 # Symlink — future edits to the repo file propagate automatically (recommended)
 mkdir -p ~/.claude/skills
-ln -s /Users/user/path/to/projects/owl/skills/owl-plan-author ~/.claude/skills/owl-plan-author
+ln -s "$(pwd)/skills/owl-plan-author" ~/.claude/skills/owl-plan-author
 ```
 
 Alternative (copy — snapshot, won't track future edits):
 
 ```sh
 mkdir -p ~/.claude/skills/owl-plan-author
-cp /Users/user/path/to/projects/owl/skills/owl-plan-author/SKILL.md ~/.claude/skills/owl-plan-author/SKILL.md
+cp skills/owl-plan-author/SKILL.md ~/.claude/skills/owl-plan-author/SKILL.md
 ```
 
 After installing, **restart Claude Code** to pick up the skill (skills are scanned at session start and don't hot-reload).
@@ -190,3 +223,7 @@ After installing, **restart Claude Code** to pick up the skill (skills are scann
 - Codex-backed roles use `codex exec --full-auto --skip-git-repo-check`
 - All logs go to `agent.log`
 - Work directories (`.work/`) contain per-plan execution logs, review files, and commit manifests
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.

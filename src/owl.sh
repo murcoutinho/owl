@@ -67,7 +67,11 @@ fi
 # night re-run without the flag to drain the low-priority queue.
 SKIP_LOW_PRIORITY="${OWL_SKIP_LOW_PRIORITY:-0}"
 
-# Parse CLI args (only --skip-low-priority and --help supported for now).
+# When set to a non-empty path, owl runs validate_plan() and exits without
+# acquiring the lock or entering the main loop. Set by --validate <path>.
+VALIDATE_PLAN_FILE=""
+
+# Parse CLI args.
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --skip-low-priority)
@@ -78,17 +82,28 @@ while [ "$#" -gt 0 ]; do
       SKIP_LOW_PRIORITY=0
       shift
       ;;
+    --validate)
+      if [ -z "${2:-}" ]; then
+        echo "error: --validate requires a plan file path" >&2
+        exit 2
+      fi
+      VALIDATE_PLAN_FILE="$2"
+      shift 2
+      ;;
     -h|--help)
       cat <<'HELPEOF'
-Usage: owl.sh [--skip-low-priority] [--include-low-priority]
+Usage: owl.sh [--skip-low-priority] [--include-low-priority] [--validate <plan>]
 
   --skip-low-priority     Skip plans whose frontmatter has `priority: low`.
                           Also honored via env var OWL_SKIP_LOW_PRIORITY=1.
   --include-low-priority  Force-include low-priority plans even if the env
                           var is set (useful for a nightly drain run).
+  --validate <plan>       Parse <plan> and print what the agent would do
+                          without calling any LLM or touching git. Exits 0
+                          on success; does not acquire the lock file.
   -h, --help              Show this help.
 
-All other configuration is via environment variables — see README.
+All other configuration is via environment variables -- see README.
 HELPEOF
       exit 0
       ;;
@@ -219,9 +234,11 @@ run_llm() {
 
   case "$provider" in
     claude)
+      # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
       retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
       ;;
     codex)
+      # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
       retry_on_limit "Codex run" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file"
       ;;
     none)
@@ -293,8 +310,9 @@ reset_all_repos_to_base() {
   fi
 
   while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
+    local repo_root repo_name
+    repo_root="$(dirname "$repo_dir")"
+    repo_name="$(basename "$repo_root")"
 
     # Skip repos with no commits
     if ! git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
@@ -369,8 +387,9 @@ push_and_open_prs() {
   fi
 
   while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
+    local repo_root repo_name
+    repo_root="$(dirname "$repo_dir")"
+    repo_name="$(basename "$repo_root")"
 
     # Skip repos that don't have this branch
     if ! git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
@@ -437,7 +456,8 @@ EOF
 # ─── Step 8: Switch all repos back to main ───
 switch_all_to_main() {
   while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
+    local repo_root
+    repo_root="$(dirname "$repo_dir")"
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       git -C "$repo_root" checkout main 2>>"$LOG_FILE" || log "  $(basename "$repo_root"): WARNING — failed to checkout main"
     fi
@@ -447,7 +467,8 @@ switch_all_to_main() {
 # ─── Execute plan ───
 execute_plan() {
   local plan_file="$1"
-  local plan_name="$(basename "$plan_file")"
+  local plan_name
+  plan_name="$(basename "$plan_file")"
 
   log "========================================="
   log "Found plan: $plan_name"
@@ -466,7 +487,8 @@ execute_plan() {
     log "Base branch for this plan: $plan_base_branch"
   fi
 
-  local work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
+  local work_id
+  work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
   local plan_work_dir="$WORK_DIR/$work_id"
   mkdir -p "$plan_work_dir"
   echo "$plan_review_iterations" > "$plan_work_dir/review_iterations"
@@ -485,7 +507,8 @@ execute_plan() {
   local pre_dirty_file="$plan_work_dir/pre_dirty_repos.txt"
   : > "$pre_dirty_file"
   while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
+    local repo_root
+    repo_root="$(dirname "$repo_dir")"
     if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
        ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
        [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
@@ -526,8 +549,9 @@ PLANEOF
     log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
     # Discard partial changes only in repos dirtied by THIS run (not pre-existing dirty repos)
     while IFS= read -r -d '' repo_dir; do
-      local repo_root="$(dirname "$repo_dir")"
-      local repo_name="$(basename "$repo_root")"
+      local repo_root repo_name
+      repo_root="$(dirname "$repo_dir")"
+      repo_name="$(basename "$repo_root")"
       # Skip repos that were already dirty before execution
       if grep -qxF "$repo_root" "$pre_dirty_file" 2>/dev/null; then
         continue
@@ -549,8 +573,9 @@ PLANEOF
   log "[Step 4] Creating branch and committing changes..."
   : > "$plan_work_dir/review_input_1.tsv"
   while IFS= read -r -d '' repo_dir; do
-    local repo_root="$(dirname "$repo_dir")"
-    local repo_name="$(basename "$repo_root")"
+    local repo_root repo_name
+    repo_root="$(dirname "$repo_dir")"
+    repo_name="$(basename "$repo_root")"
 
     # Skip repos with no changes
     if git -C "$repo_root" diff --quiet 2>/dev/null && \
@@ -581,6 +606,7 @@ PLANEOF
       log "  $repo_name: deleting stale branch '$branch_name'"
       git -C "$repo_root" branch -D "$branch_name" 2>>"$LOG_FILE"
     fi
+    # shellcheck disable=SC2129 # separate redirects are intentional here for clarity
     git -C "$repo_root" checkout -b "$branch_name" 2>>"$LOG_FILE"
 
     # Stage and commit
@@ -646,7 +672,8 @@ run_review_loop() {
   # Ensure we're on the right branch
   if [ -n "$branch_name" ]; then
     while IFS= read -r -d '' repo_dir; do
-      local repo_root="$(dirname "$repo_dir")"
+      local repo_root
+      repo_root="$(dirname "$repo_dir")"
       if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
         git -C "$repo_root" checkout "$branch_name" 2>/dev/null
       fi
@@ -662,7 +689,7 @@ run_review_loop() {
   local review_rounds_completed=$reviews_done
   local reviews_skipped=0
 
-  for i in $(seq $((reviews_done + 1)) $review_iterations); do
+  for i in $(seq $((reviews_done + 1)) "$review_iterations"); do
     log "-----------------------------------------"
     log "[Iteration $i/$review_iterations] Review phase"
     log "-----------------------------------------"
@@ -761,8 +788,7 @@ run_review_loop() {
           run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$review_prompt_file" || rc=$?
           echo "$RETRY_OUTPUT"
           exit $rc
-        ) > "$reviewer1_file" 2>&1
-        [ $? -eq 0 ] || reviewer1_ok=false
+        ) > "$reviewer1_file" 2>&1 || reviewer1_ok=false
       else
         echo "LGTM" > "$reviewer1_file"
       fi
@@ -775,8 +801,7 @@ run_review_loop() {
           run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$review_prompt_file" || rc=$?
           echo "$RETRY_OUTPUT"
           exit $rc
-        ) > "$reviewer2_file" 2>&1
-        [ $? -eq 0 ] || reviewer2_ok=false
+        ) > "$reviewer2_file" 2>&1 || reviewer2_ok=false
       else
         echo "LGTM" > "$reviewer2_file"
       fi
@@ -843,8 +868,9 @@ FIXEOF
     local next_manifest="$plan_work_dir/review_input_$((i + 1)).tsv"
     : > "$next_manifest"
     while IFS= read -r -d '' repo_dir; do
-      local repo_root="$(dirname "$repo_dir")"
-      local repo_name="$(basename "$repo_root")"
+      local repo_root repo_name
+      repo_root="$(dirname "$repo_dir")"
+      repo_name="$(basename "$repo_root")"
       local current_branch
       current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
 
@@ -895,7 +921,8 @@ FIXEOF
   log "========================================="
 
   mkdir -p "$PLAN_DIR/done"
-  local done_name="${plan_name%.md}_$(date '+%Y%m%d_%H%M%S').done.md"
+  local done_name
+  done_name="${plan_name%.md}_$(date '+%Y%m%d_%H%M%S').done.md"
   local done_path="$PLAN_DIR/done/$done_name"
 
   {
@@ -924,7 +951,7 @@ FIXEOF
       echo "  - (none)"
     fi
     echo ""
-    for r in $(seq 1 $review_rounds_completed); do
+    for r in $(seq 1 "$review_rounds_completed"); do
       echo "### Review Round $r"
       echo ""
       if [ -f "$plan_work_dir/combined_review_$r.txt" ]; then
@@ -948,10 +975,11 @@ resume_pending_reviews() {
   local resumed=false
   for pending_file in "$WORK_DIR"/*/pending; do
     [ -f "$pending_file" ] || continue
-    local plan_work_dir="$(dirname "$pending_file")"
+    local plan_work_dir plan_name
+    plan_work_dir="$(dirname "$pending_file")"
     local plan_file
     plan_file="$(cat "$pending_file")"
-    local plan_name="$(basename "$plan_file")"
+    plan_name="$(basename "$plan_file")"
 
     if [ ! -f "$plan_file" ]; then
       log "Pending review for '$plan_name' but plan file is gone. Cleaning up."
@@ -1010,7 +1038,78 @@ check_plans() {
   fi
 }
 
+# ─── Validate plan (dry-run) ───
+# Invoked when --validate <plan> is passed. Parses frontmatter and enumerates
+# what the agent would do without calling any LLM or touching git.
+# NOTE: keep this in sync with execute_plan() -- if a new frontmatter field is
+# added there, add it here too so --validate reports it accurately.
+validate_plan() {
+  local plan_file="$VALIDATE_PLAN_FILE"
+
+  # 1. Confirm the file exists and print its absolute path
+  if [ ! -f "$plan_file" ]; then
+    echo "error: plan file not found: $plan_file" >&2
+    return 1
+  fi
+  local abs_path
+  abs_path="$(cd "$(dirname "$plan_file")" && pwd)/$(basename "$plan_file")"
+  echo "Plan file: $abs_path"
+  echo ""
+
+  # 2. Parse frontmatter fields
+  local review_rounds priority base_branch
+  review_rounds="$(parse_plan_review_rounds "$plan_file")"
+  priority="$(parse_plan_priority "$plan_file")"
+  base_branch="$(parse_plan_base_branch "$plan_file")"
+
+  echo "Frontmatter:"
+  echo "  review-rounds : $review_rounds"
+  echo "  priority      : ${priority:-normal}"
+  echo "  base-branch   : ${base_branch:-(none)}"
+  echo ""
+
+  # 3. Compute target branch name
+  local plan_name
+  plan_name="$(basename "$plan_file")"
+  local branch_name="owl/${plan_name%.md}"
+  echo "Target branch: $branch_name"
+  echo ""
+
+  # 4. Enumerate target repos and (5) check base-branch availability
+  echo "Target repos:"
+  local found_repos=0
+  while IFS= read -r -d '' repo_dir; do
+    local repo_root repo_name
+    repo_root="$(dirname "$repo_dir")"
+    repo_name="$(basename "$repo_root")"
+    echo "  - $repo_name ($repo_root)"
+    found_repos=$((found_repos + 1))
+
+    if [ -n "$base_branch" ]; then
+      # Check local remote-tracking ref only (no fetch -- validation must not touch git)
+      if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
+        echo "      would use base: $base_branch"
+      else
+        echo "      would fall back to main (base '$base_branch' not cached locally)"
+      fi
+    fi
+  done < <(find_target_repos)
+
+  if [ "$found_repos" -eq 0 ]; then
+    echo "  (none found -- check OWL_TARGET_REPOS)"
+  fi
+  echo ""
+
+  echo "validation OK -- run without --validate to execute"
+  return 0
+}
+
 # ─── Main ───
+if [ -n "$VALIDATE_PLAN_FILE" ]; then
+  validate_plan
+  exit $?
+fi
+
 acquire_lock
 
 log "Dev Agent started. Checking every $(format_poll_interval "$POLL_INTERVAL_SECONDS")."
