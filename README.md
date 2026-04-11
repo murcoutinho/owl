@@ -127,10 +127,10 @@ Set env vars before starting `src/owl.sh`:
 | `OWL_FIX_PROVIDER` | `OWL_IMPL_PROVIDER` | Provider for fix phase: `claude` or `codex` |
 | `OWL_FIX_MODEL` | `OWL_IMPL_MODEL` | Model for fix phase |
 | `OWL_REVIEWER1_PROVIDER` | `codex` | Reviewer slot 1 provider: `claude`, `codex`, or `none` |
-| `OWL_REVIEWER1_MODEL` | `gpt-5.4` | Reviewer slot 1 model |
+| `OWL_REVIEWER1_MODEL` | `gpt-5.4` | Reviewer slot 1 model. Leave blank or set to `none` to disable the slot. |
 | `OWL_REVIEWER1_LABEL` | `Codex` | Reviewer slot 1 label in logs/output |
 | `OWL_REVIEWER2_PROVIDER` | `claude` | Reviewer slot 2 provider: `claude`, `codex`, or `none` |
-| `OWL_REVIEWER2_MODEL` | `claude-sonnet-4-6` | Reviewer slot 2 model |
+| `OWL_REVIEWER2_MODEL` | `claude-sonnet-4-6` | Reviewer slot 2 model. Leave blank or set to `none` to disable the slot. |
 | `OWL_REVIEWER2_LABEL` | `Claude Code` | Reviewer slot 2 label in logs/output |
 | `OWL_REVIEW_MODE` | `parallel` | Reviewer scheduling: `parallel` or `sequential` |
 | `REVIEW_ITERATIONS` | 2 | Default review-fix cycles per plan (plans may override up to 3 via frontmatter) |

@@ -215,6 +215,24 @@ normalize_provider() {
   echo "${1:-}" | tr '[:upper:]' '[:lower:]'
 }
 
+normalize_model_name() {
+  echo "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs
+}
+
+reviewer_slot_enabled() {
+  local provider model
+  provider="$(normalize_provider "$1")"
+  model="$(normalize_model_name "$2")"
+
+  if [ "$provider" = "none" ] || [ -z "$provider" ]; then
+    return 1
+  fi
+  if [ "$model" = "none" ] || [ -z "$model" ]; then
+    return 1
+  fi
+  return 0
+}
+
 # Print the plan file with YAML frontmatter (--- ... ---) stripped.
 strip_plan_frontmatter() {
   local plan_file="$1"
@@ -876,8 +894,8 @@ run_review_loop() {
     local reviewer2_file="$plan_work_dir/reviewer2_$i.txt"
     local reviewer1_ok=true reviewer2_ok=true
     local reviewer1_enabled=true reviewer2_enabled=true
-    [ "$(normalize_provider "$REVIEWER1_PROVIDER")" = "none" ] && reviewer1_enabled=false
-    [ "$(normalize_provider "$REVIEWER2_PROVIDER")" = "none" ] && reviewer2_enabled=false
+    reviewer_slot_enabled "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" || reviewer1_enabled=false
+    reviewer_slot_enabled "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" || reviewer2_enabled=false
 
     if [ "$REVIEW_MODE" = "parallel" ]; then
       log "Spawning reviewers in parallel..."
