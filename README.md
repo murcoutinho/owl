@@ -103,6 +103,7 @@ repo checks out `019`'s branch and the new commits stack on top; the
 - **Multi-repo** — commits and reviews across all git repos in the parent directory
 - **Targeted diffs** — each review round sees exactly its own commit, not HEAD~1
 - **Plan-aware review** — reviewers and the fix agent both receive the plan text alongside the diff, so deliberate changes that match the plan are not flagged as regressions
+- **Deterministic test gate** — opt-in per repo via `OWL_TEST_CMD_<repo>`; Owl runs the command at the top of every review round and feeds failing output to the fix agent alongside LLM reviewer feedback, and refuses to LGTM-exit while any suite is red
 - **Stacked plans** — a plan can declare `base-branch:` in its frontmatter to start from another plan's branch instead of `main`, allowing dependent plans to queue before their parents are merged
 - **Low-priority queue** — plans marked `priority: low` can be skipped during the day (`--skip-low-priority`) and drained overnight, so token-heavy nice-to-haves don't starve high-value work
 - **Lock file** — prevents concurrent agent instances
@@ -127,8 +128,51 @@ Set env vars before starting `src/owl.sh`:
 | `OWL_REVIEW_MODE` | `parallel` | Reviewer scheduling: `parallel` or `sequential` |
 | `REVIEW_ITERATIONS` | 2 | Default review-fix cycles per plan (plans may override up to 3 via frontmatter) |
 | `OWL_SKIP_LOW_PRIORITY` | `0` | When `1`, skip plans with `priority: low` in frontmatter. Equivalent to the `--skip-low-priority` CLI flag. |
+| `OWL_TEST_CMD_<repo>` | *(unset)* | Optional deterministic (non-LLM) test command for one repo. See "Deterministic test gate" below. |
 | `RETRY_WAIT` | 600 | Seconds between rate-limit retries |
 | `MAX_RETRIES` | 50 | Max retry attempts (~8 hours) |
+
+### Deterministic test gate
+
+Owl can run your project's real test suite on every review round and feed any
+failures to the fix agent alongside the LLM reviewer feedback. This catches
+regressions that slip past the reviewers (whose input is limited to the diff
+and the plan text) and anchors iteration on objective signal instead of just
+model opinion.
+
+Opt in per repo by setting `OWL_TEST_CMD_<repo_name>` in your private
+`.env.local` (the same file that holds `OWL_TARGET_REPOS`). Hyphens in the
+repo name are replaced with underscores in the variable name:
+
+```bash
+# .env.local
+OWL_TARGET_REPOS="project-api project-web"
+OWL_TEST_CMD_project-api="python -m pytest -q --tb=short"
+OWL_TEST_CMD_project-api_mobile="npm test --silent"
+```
+
+Behavior:
+
+- At the top of every review iteration, Owl runs the configured command in
+  each repo's root directory. A repo with no command configured is silently
+  skipped — not every repo needs a deterministic suite.
+- If any suite exits non-zero, the last 200 lines of its combined
+  stdout/stderr are appended to that round's `combined_review_<i>.txt` under
+  a **Deterministic test failures** heading and handed to the fix agent with
+  the reviewer comments. The fix prompt is instructed to treat failing tests
+  as non-negotiable and to investigate root cause rather than delete or skip
+  tests.
+- The LGTM early-exit is gated on tests passing: Owl will not bail out of the
+  review loop while any configured suite is red, even if both reviewers
+  return `LGTM`.
+- Per-repo logs land in `.work/<plan>/tests_<repo>_<round>.log` and the
+  aggregated failure summary in `.work/<plan>/tests_<round>.txt`.
+
+Keep the command **fast and deterministic** — it runs on every iteration. Put
+slow end-to-end or real-LLM suites behind a separate command/marker so they
+don't burn budget in the Owl loop. For example, the project-api repo separates
+cheap tests (`tests/`) from LLM-backed tests (`tests/e2e/`) and configures
+only the cheap path here.
 
 Example: Codex-only execution/fixes, Codex+Claude review:
 

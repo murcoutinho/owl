@@ -94,6 +94,16 @@ How to confirm the plan worked end-to-end:
 - Automated steps: compile, `pytest`, `tsc --noEmit`, grep for specific strings.
 - At least one manual test for UI changes.
 
+**Note — Owl's deterministic test gate.** If the target repo has an
+`OWL_TEST_CMD_<repo>` command configured in Owl's private `.env.local`, Owl
+runs that suite at the top of every review round and feeds failures back to
+the fix agent alongside the LLM reviewer feedback. You do NOT need to
+instruct the agent to "run the tests" — it is automatic and non-negotiable.
+What you DO need to do: list the same (or a superset of) commands in this
+Verification section so human reviewers can reproduce them locally, and make
+sure any new code paths the plan introduces are covered by tests that the
+gate will actually exercise.
+
 ### 8. Risks and known limitations
 Edge cases, migration concerns, things intentionally left out that might surface during review.
 
