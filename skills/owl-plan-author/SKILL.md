@@ -14,7 +14,7 @@ Follow this checklist in order every time you author a new Owl plan. Do not skip
 **Always inspect BOTH `plan/` and `plan/done/`** before choosing a number.
 
 ```sh
-ls owl/plan/ owl/plan/done/
+ls plan/ plan/done/
 ```
 
 - Note the highest numeric prefix across **both** directories combined.
