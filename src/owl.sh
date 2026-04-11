@@ -166,6 +166,9 @@ run_deterministic_tests() {
     local repo_log="$plan_work_dir/tests_${repo_name}_$round.log"
     log "[Tests] $repo_name: $cmd"
 
+    # `eval` is safe here: `$cmd` comes from `OWL_TEST_CMD_<repo>` which is
+    # operator-controlled via .env.local, same trust boundary as every other
+    # OWL_ config var. Do NOT expose this to plan content or LLM output.
     local rc=0
     ( cd "$repo_root" && eval "$cmd" ) > "$repo_log" 2>&1 || rc=$?
 
@@ -894,9 +897,17 @@ run_review_loop() {
     fi
 
     if ! $reviewer1_ok && ! $reviewer2_ok; then
-      log "All enabled reviewers failed for iteration $i (likely unrecoverable rate limit after $MAX_RETRIES retries)."
+      # Peek at the last non-empty line of each reviewer's captured output so
+      # operators can tell rate-limit exhaustion from a tool crash (missing
+      # binary, auth error, etc.) without grepping the .work/ logs.
+      local reviewer1_tail="" reviewer2_tail=""
+      [ -f "$reviewer1_file" ] && reviewer1_tail=$(tail -n 10 "$reviewer1_file" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | head -c 200)
+      [ -f "$reviewer2_file" ] && reviewer2_tail=$(tail -n 10 "$reviewer2_file" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | head -c 200)
+      log "All enabled reviewers failed for iteration $i (retry_on_limit exhausted or non-recoverable error after up to $MAX_RETRIES attempts)."
+      [ -n "$reviewer1_tail" ] && log "  $REVIEWER1_LABEL tail: $reviewer1_tail"
+      [ -n "$reviewer2_tail" ] && log "  $REVIEWER2_LABEL tail: $reviewer2_tail"
       had_unrecoverable_llm_failure=true
-      abort_reason="all reviewers failed (likely rate-limited)"
+      abort_reason="all reviewers failed (rate-limited or tool crash)"
       abort_iteration=$i
       break
     fi
@@ -966,9 +977,14 @@ FIXEOF
     run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" || fix_rc=$?
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
     if [ "$fix_rc" -ne 0 ]; then
-      log "Fix LLM failed for iteration $i (exit=$fix_rc, likely unrecoverable rate limit after $MAX_RETRIES retries)."
+      # Same as the reviewer abort: surface the last non-empty output line so
+      # the operator can distinguish rate-limit exhaustion from tool crashes.
+      local fix_tail=""
+      fix_tail=$(printf '%s\n' "$RETRY_OUTPUT" | grep -v '^[[:space:]]*$' | tail -n 1 | head -c 200)
+      log "Fix LLM failed for iteration $i (exit=$fix_rc, retry_on_limit exhausted or non-recoverable error after up to $MAX_RETRIES attempts)."
+      [ -n "$fix_tail" ] && log "  fix tail: $fix_tail"
       had_unrecoverable_llm_failure=true
-      abort_reason="fix LLM failed (likely rate-limited)"
+      abort_reason="fix LLM failed (rate-limited or tool crash)"
       abort_iteration=$i
       break
     fi
@@ -1267,25 +1283,31 @@ validate_plan() {
 }
 
 # ─── Main ───
-if [ -n "$VALIDATE_PLAN_FILE" ]; then
-  validate_plan
-  exit $?
+# Guarded so tests can source this file to exercise individual functions
+# without running the lock/loop. Matches the Python `if __name__ == "__main__"`
+# idiom: when executed directly, $0 equals ${BASH_SOURCE[0]}; when sourced,
+# they differ.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ -n "$VALIDATE_PLAN_FILE" ]; then
+    validate_plan
+    exit $?
+  fi
+
+  acquire_lock
+
+  log "Dev Agent started. Checking every $(format_poll_interval "$POLL_INTERVAL_SECONDS")."
+  log "Plan directory: $PLAN_DIR"
+  log "Project directory: $PROJECT_DIR"
+  log "Review iterations: $REVIEW_ITERATIONS (default; plans may override up to $MAX_REVIEW_ROUNDS via frontmatter)"
+  if [ "$SKIP_LOW_PRIORITY" = "1" ]; then
+    log "Low-priority plans: SKIPPING (plans with 'priority: low' in frontmatter will be bypassed)"
+  else
+    log "Low-priority plans: INCLUDED"
+  fi
+
+  while true; do
+    check_plans
+    log "Sleeping $(format_poll_interval "$POLL_INTERVAL_SECONDS")..."
+    sleep "$POLL_INTERVAL_SECONDS"
+  done
 fi
-
-acquire_lock
-
-log "Dev Agent started. Checking every $(format_poll_interval "$POLL_INTERVAL_SECONDS")."
-log "Plan directory: $PLAN_DIR"
-log "Project directory: $PROJECT_DIR"
-log "Review iterations: $REVIEW_ITERATIONS (default; plans may override up to $MAX_REVIEW_ROUNDS via frontmatter)"
-if [ "$SKIP_LOW_PRIORITY" = "1" ]; then
-  log "Low-priority plans: SKIPPING (plans with 'priority: low' in frontmatter will be bypassed)"
-else
-  log "Low-priority plans: INCLUDED"
-fi
-
-while true; do
-  check_plans
-  log "Sleeping $(format_poll_interval "$POLL_INTERVAL_SECONDS")..."
-  sleep "$POLL_INTERVAL_SECONDS"
-done
