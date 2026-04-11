@@ -129,6 +129,73 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# Run any deterministic (non-LLM) test commands configured for the target repos.
+#
+# For each repo in TARGET_REPOS, looks up the env var
+# `OWL_TEST_CMD_<repo_name>` (hyphens replaced with underscores). If set, runs
+# the command in the repo root and captures combined stdout/stderr.
+#
+# Writes a summary of failing suites to `$plan_work_dir/tests_$round.txt` — the
+# review loop appends that file to the combined review so the fix agent sees
+# test failures alongside LLM reviewer feedback.
+#
+# Return codes:
+#   0 — no failures (either everything passed, or no repo had a command set)
+#   1 — at least one configured suite failed
+run_deterministic_tests() {
+  local plan_work_dir="$1"
+  local round="$2"
+  local summary_file="$plan_work_dir/tests_$round.txt"
+  : > "$summary_file"
+
+  local any_configured=false
+  local any_failed=false
+
+  while IFS= read -r -d '' repo_dir; do
+    local repo_root repo_name var_name cmd
+    repo_root="$(dirname "$repo_dir")"
+    repo_name="$(basename "$repo_root")"
+    var_name="OWL_TEST_CMD_${repo_name//-/_}"
+    cmd="${!var_name:-}"
+
+    if [ -z "$cmd" ]; then
+      continue
+    fi
+    any_configured=true
+
+    local repo_log="$plan_work_dir/tests_${repo_name}_$round.log"
+    log "[Tests] $repo_name: $cmd"
+
+    local rc=0
+    ( cd "$repo_root" && eval "$cmd" ) > "$repo_log" 2>&1 || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+      any_failed=true
+      log "[Tests] $repo_name: FAILED (exit=$rc)"
+      {
+        echo "### $repo_name — tests FAILED (exit=$rc)"
+        echo ""
+        echo "Command: \`$cmd\`"
+        echo ""
+        echo '```'
+        tail -n 200 "$repo_log"
+        echo '```'
+        echo ""
+      } >> "$summary_file"
+    else
+      log "[Tests] $repo_name: passed"
+    fi
+  done < <(find_target_repos)
+
+  if ! $any_configured; then
+    return 0
+  fi
+  if $any_failed; then
+    return 1
+  fi
+  return 0
+}
+
 format_poll_interval() {
   local seconds="$1"
   if [ "$seconds" -eq 60 ]; then
@@ -702,6 +769,14 @@ run_review_loop() {
       continue
     fi
 
+    # Run deterministic tests before reviewers produce feedback. Any failures
+    # get appended to the combined review below so the fix agent sees them
+    # alongside LLM reviewer comments. Repos without OWL_TEST_CMD_<name> are
+    # silently skipped; operators opt in per repo via .env.local.
+    local tests_summary_file="$plan_work_dir/tests_$i.txt"
+    local tests_ok=true
+    run_deterministic_tests "$plan_work_dir" "$i" || tests_ok=false
+
     # Build review prompt — tell the LLM where to look, it reads the diff itself.
     # The plan is included so the reviewer can check the diff against the author's
     # intent instead of flagging deliberate changes as regressions.
@@ -827,6 +902,16 @@ $reviewer1_review
 
 $reviewer2_review"
 
+    if [ -s "$tests_summary_file" ]; then
+      combined_review="$combined_review
+
+## Deterministic test failures
+
+These suites were run automatically by Owl after the previous commit and failed. The fix MUST make them pass again; treat this as non-negotiable, ranking higher than any reviewer preference that contradicts a failing test. Do not delete, skip, or trivially mock tests just to make them pass — investigate the failure and fix the actual cause.
+
+$(cat "$tests_summary_file")"
+    fi
+
     echo "$combined_review" > "$plan_work_dir/combined_review_$i.txt"
     review_rounds_completed=$i
 
@@ -834,10 +919,14 @@ $reviewer2_review"
     reviewer1_trimmed=$(echo "$reviewer1_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     reviewer2_trimmed=$(echo "$reviewer2_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    if { ! $reviewer1_enabled || [ "$reviewer1_trimmed" = "LGTM" ]; } && \
+    if $tests_ok && \
+       { ! $reviewer1_enabled || [ "$reviewer1_trimmed" = "LGTM" ]; } && \
        { ! $reviewer2_enabled || [ "$reviewer2_trimmed" = "LGTM" ]; }; then
-      log "All enabled reviewers say LGTM. No fixes needed."
+      log "All enabled reviewers say LGTM and deterministic tests passed. No fixes needed."
       break
+    fi
+    if ! $tests_ok; then
+      log "Deterministic tests failed — fix phase will address them alongside reviewer feedback."
     fi
 
     # ── Fix phase ──
