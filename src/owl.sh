@@ -341,12 +341,23 @@ run_llm() {
   local model="$2"
   local prompt_file="$3"
   local session_id="${4:-}"
+  local session_mode="${5:-session}"  # "session" (--session-id, creates) or "resume" (--resume, appends)
 
   case "$provider" in
     claude)
       if [ -n "$session_id" ]; then
-        # shellcheck disable=SC2016 # $1/$2/$3 are positional args to the inner bash -c subshell
-        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+        if [ "$session_mode" = "resume" ]; then
+          # --resume appends to an existing session's conversation history
+          # without taking an exclusive lock. Use this for the fix phase
+          # after the execution phase created the session with --session-id.
+          # shellcheck disable=SC2016
+          retry_on_limit "Claude run (resume)" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --resume "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+        else
+          # --session-id creates/opens the session with an exclusive lock.
+          # Use this for the execution phase (first call in a plan).
+          # shellcheck disable=SC2016
+          retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+        fi
       else
         # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
         retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
@@ -1119,11 +1130,13 @@ FIXEOF
     log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
     local fix_rc=0
     local fix_session_id=""
+    local fix_session_mode=""
     if [ "$(normalize_provider "$FIX_PROVIDER")" = "claude" ] && [ -n "$coder_claude_session_id" ]; then
       fix_session_id="$coder_claude_session_id"
-      log "Reusing Claude coder session for fixes: $fix_session_id"
+      fix_session_mode="resume"
+      log "Resuming Claude coder session for fixes: $fix_session_id"
     fi
-    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" "$fix_session_id" || fix_rc=$?
+    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" "$fix_session_id" "$fix_session_mode" || fix_rc=$?
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
     if [ "$fix_rc" -ne 0 ]; then
       # Same as the reviewer abort: surface the last non-empty output line so
