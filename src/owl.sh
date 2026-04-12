@@ -850,6 +850,48 @@ run_review_loop() {
     reviews_done=${reviews_done:-0}
   fi
 
+  # Verify that each repo's branch tip still matches the HEAD hash we
+  # recorded for the iteration we're about to run. If someone rewrote the
+  # branch between cycles (interrupted commit, manual amend, force push,
+  # accidental reset), the review would diff against a range that no longer
+  # matches reality. Abort cleanly so the operator can investigate. On the
+  # first call from execute_plan this is a tautology (the manifest was
+  # written seconds ago), so the check is effectively a no-op except on
+  # genuine resume.
+  local resume_manifest="$plan_work_dir/review_input_$((reviews_done + 1)).tsv"
+  if [ -s "$resume_manifest" ]; then
+    local drift_detected=false
+    while IFS=$'\t' read -r repo_name repo_root base_hash expected_head; do
+      [ -n "$repo_root" ] || continue
+      if [ ! -d "$repo_root/.git" ]; then
+        log "[Resume] $repo_name: repo directory missing at $repo_root"
+        drift_detected=true
+        continue
+      fi
+      local actual_head
+      actual_head=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo "")
+      if [ "$actual_head" != "$expected_head" ]; then
+        log "[Resume] $repo_name: HEAD=${actual_head:-<unknown>} does not match recorded manifest head=$expected_head"
+        drift_detected=true
+      fi
+    done < "$resume_manifest"
+    if $drift_detected; then
+      log "Branch state drifted from recorded manifest. Leaving pending — investigate manually before the next cycle."
+      {
+        echo "plan_name=$plan_name"
+        echo "plan_file=$plan_file"
+        echo "branch_name=$branch_name"
+        echo "failed_iteration=$((reviews_done + 1))"
+        echo "total_iterations=$review_iterations"
+        echo "reviews_done=$reviews_done"
+        echo "reason=branch tip drifted from recorded manifest head"
+        echo "aborted_at=$(date '+%Y-%m-%d %H:%M:%S')"
+      } > "$plan_work_dir/pending_status"
+      switch_all_to_main
+      return 1
+    fi
+  fi
+
   local review_rounds_completed=$reviews_done
   local reviews_skipped=0
 
@@ -1051,7 +1093,17 @@ $(cat "$tests_summary_file")"
     cat > "$fix_prompt_file" <<FIXEOF
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
-CRITICAL: The plan below is the source of truth for what the code should do. If a reviewer comment contradicts the plan (e.g. asks you to revert a change that the plan explicitly requested), IGNORE that comment. Only apply fixes that are consistent with the plan. If a reviewer asks a hedged question ("if X is intentional, document it; if not, revert") and the plan confirms X is intentional, prefer a short comment or docstring over reverting.
+How to handle conflicts between the plan and the reviewers:
+
+The plan below describes the intended behavior and is the default source of truth. Reviewer comments should be weighed against it, not applied blindly.
+
+1. If a reviewer comment is consistent with the plan, apply the fix.
+2. If a reviewer comment CONTRADICTS the plan (for example, asks you to revert a change that the plan explicitly requested), do not apply it automatically. First reason about whether the reviewer has actually identified a real defect the plan overlooked:
+   - Does following the plan as-written cause a concrete bug, crash, data loss, security issue, incorrect result, or broken build?
+   - Is the reviewer's suggested fix the right way to address that specific defect?
+   If BOTH are clearly yes, deviate from the plan and apply the reviewer's fix. In that case, add a brief comment at the change site (or in your final summary) stating which plan instruction you deviated from and why the reviewer's concern was strong enough to override it.
+   If the contradiction is a style preference, a hedged question, a refactor suggestion, or anything short of a concrete defect, follow the plan. For hedged questions ("if X is intentional, document it; if not, revert") where the plan confirms X is intentional, prefer a short comment or docstring over reverting.
+3. When in doubt, the plan wins. Deviation is reserved for cases where the reviewer catches a real bug the plan got wrong, not for taste-level disagreement.
 
 IMPORTANT: Do NOT commit, push, or create branches. Just write the code fixes.
 
