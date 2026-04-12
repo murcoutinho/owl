@@ -340,14 +340,27 @@ run_llm() {
   provider="$(normalize_provider "$1")"
   local model="$2"
   local prompt_file="$3"
+  local session_id="${4:-}"
+  # "create" uses --session-id (first call, takes exclusive lock).
+  # "resume" uses --resume  (subsequent calls, appends to existing session).
+  # Sessions are directory-scoped — both calls must run from the same cwd.
+  local session_mode="${5:-create}"
 
   case "$provider" in
     claude)
-      # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
-      retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      if [ -n "$session_id" ] && [ "$session_mode" = "resume" ]; then
+        # shellcheck disable=SC2016
+        retry_on_limit "Claude run (resume)" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --resume "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+      elif [ -n "$session_id" ]; then
+        # shellcheck disable=SC2016
+        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+      else
+        # shellcheck disable=SC2016
+        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      fi
       ;;
     codex)
-      # shellcheck disable=SC2016 # $1/$2 are positional args to the inner bash -c subshell
+      # shellcheck disable=SC2016
       retry_on_limit "Codex run" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file"
       ;;
     none)
@@ -359,6 +372,27 @@ run_llm() {
       return 1
       ;;
   esac
+}
+
+get_or_create_coder_session_id() {
+  local plan_work_dir="$1"
+  local session_file="$plan_work_dir/coder_session_id"
+  if [ -f "$session_file" ]; then
+    head -n 1 "$session_file"
+    return 0
+  fi
+  local sid
+  sid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  printf '%s\n' "$sid" > "$session_file"
+  echo "$sid"
+}
+
+load_coder_session_id() {
+  local plan_work_dir="$1"
+  local session_file="$plan_work_dir/coder_session_id"
+  if [ -f "$session_file" ]; then
+    head -n 1 "$session_file"
+  fi
 }
 
 acquire_lock() {
@@ -626,6 +660,16 @@ execute_plan() {
 
   local branch_name="owl/${plan_name%.md}"
 
+  # Create a session ID for the Claude coder so the fix phase can --resume
+  # into the same conversation and reuse file-read context. Sessions are
+  # directory-scoped, so both the execution and fix calls must run from
+  # the same cwd (PROJECT_DIR).
+  local coder_session_id=""
+  if [ "$(normalize_provider "$IMPL_PROVIDER")" = "claude" ]; then
+    coder_session_id="$(get_or_create_coder_session_id "$plan_work_dir")"
+    log "Using Claude coder session: $coder_session_id"
+  fi
+
   # ── Step 2: Reset to base branch (or main) & pull ──
   reset_all_repos_to_base "$plan_base_branch"
 
@@ -665,7 +709,7 @@ IMPORTANT INSTRUCTIONS:
 - The agent handles all git operations.
 PLANEOF
 
-  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file"
+  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file" "$coder_session_id" "create"
   local exit_code=$?
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
@@ -772,9 +816,12 @@ run_review_loop() {
   local plan_file="$1"
   local plan_name="$2"
   local plan_work_dir="$3"
-  # Session reuse removed — --session-id creates an exclusive lock that
-  # persists after the process exits, blocking the fix phase. Revisit
-  # when Claude Code supports sequential non-interactive session access.
+
+  # Load the coder session ID so the fix phase can --resume into the
+  # execution conversation. Empty string if the execution didn't use Claude
+  # or if the session file is missing (e.g. Codex execution).
+  local coder_session_id=""
+  coder_session_id="$(load_coder_session_id "$plan_work_dir")"
 
   # Load the plan so reviewers and the fix agent can see the author's intent.
   # Without this, reviewers flag deliberate changes as regressions because they
@@ -1085,7 +1132,12 @@ FIXEOF
 
     log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
     local fix_rc=0
-    run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" || fix_rc=$?
+    if [ "$(normalize_provider "$FIX_PROVIDER")" = "claude" ] && [ -n "$coder_session_id" ]; then
+      log "Resuming Claude coder session for fixes: $coder_session_id"
+      run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" "$coder_session_id" "resume" || fix_rc=$?
+    else
+      run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" || fix_rc=$?
+    fi
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
     if [ "$fix_rc" -ne 0 ]; then
       # Same as the reviewer abort: surface the last non-empty output line so
