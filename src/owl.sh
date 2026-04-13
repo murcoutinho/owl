@@ -797,8 +797,12 @@ PLANEOF
 
   # ── Check that something was actually committed ──
   if [ ! -s "$plan_work_dir/review_input_1.tsv" ]; then
-    log "Plan produced no changes in any repo. Failing — will retry next cycle."
-    return 1
+    log "Plan produced no changes in any repo. Marking done with no-op summary."
+    log "[Step 5] Switching all repos back to main..."
+    switch_all_to_main
+    write_done_file "$plan_file" "$plan_name" "$plan_work_dir" 0 0 \
+      "No repo changes were needed. The requested work appears to already be present on main."
+    return 0
   fi
 
   # ── Step 5: Mark pending ──
@@ -809,6 +813,67 @@ PLANEOF
   # Propagate non-zero so check_plans stops this cycle and next cycle resumes
   # the pending plan before picking up anything new.
   run_review_loop "$plan_file" "$plan_name" "$plan_work_dir" || return $?
+}
+
+write_done_file() {
+  local plan_file="$1"
+  local plan_name="$2"
+  local plan_work_dir="$3"
+  local reviews_successful="$4"
+  local review_iterations="$5"
+  local completion_note="${6:-}"
+
+  mkdir -p "$PLAN_DIR/done"
+  local done_name
+  done_name="${plan_name%.md}_$(date '+%Y%m%d_%H%M%S').done.md"
+  local done_path="$PLAN_DIR/done/$done_name"
+
+  {
+    strip_plan_frontmatter "$plan_file"
+    echo ""
+    echo "---"
+    echo ""
+    echo "## Execution Summary"
+    echo ""
+    echo "- **Completed:** $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "- **Review rounds:** $reviews_successful completed / $review_iterations total"
+    if [ -n "$completion_note" ]; then
+      echo "- **Outcome:** $completion_note"
+    fi
+    echo "- **Repos changed:**"
+    if [ -f "$plan_work_dir/commits.tsv" ]; then
+      while IFS=$'\t' read -r repo_name hash; do
+        echo "  - \`$repo_name\` — commit \`$hash\`"
+      done < "$plan_work_dir/commits.tsv"
+    else
+      echo "  - (none)"
+    fi
+    echo "- **Pull requests:**"
+    if [ -f "$plan_work_dir/pull_requests.tsv" ]; then
+      while IFS=$'\t' read -r repo_name pr_url; do
+        echo "  - \`$repo_name\` — $pr_url"
+      done < "$plan_work_dir/pull_requests.tsv"
+    else
+      echo "  - (none)"
+    fi
+    echo ""
+    for r in $(seq 1 "$reviews_successful"); do
+      echo "### Review Round $r"
+      echo ""
+      if [ -f "$plan_work_dir/combined_review_$r.txt" ]; then
+        cat "$plan_work_dir/combined_review_$r.txt"
+      else
+        echo "(skipped)"
+      fi
+      echo ""
+    done
+  } > "$done_path"
+
+  rm -f "$plan_file"
+  rm -f "$plan_work_dir/pending"
+  rm -f "$plan_work_dir/state"
+  rm -f "$plan_work_dir/review_iterations"
+  log "Wrote done file: $done_name"
 }
 
 # ─── Review loop ───
@@ -1241,55 +1306,7 @@ FIXEOF
   log "========================================="
   log "Plan '$plan_name' completed."
   log "========================================="
-
-  mkdir -p "$PLAN_DIR/done"
-  local done_name
-  done_name="${plan_name%.md}_$(date '+%Y%m%d_%H%M%S').done.md"
-  local done_path="$PLAN_DIR/done/$done_name"
-
-  {
-    strip_plan_frontmatter "$plan_file"
-    echo ""
-    echo "---"
-    echo ""
-    echo "## Execution Summary"
-    echo ""
-    echo "- **Completed:** $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "- **Review rounds:** $reviews_successful completed / $review_iterations total"
-    echo "- **Repos changed:**"
-    if [ -f "$plan_work_dir/commits.tsv" ]; then
-      while IFS=$'\t' read -r repo_name hash; do
-        echo "  - \`$repo_name\` — commit \`$hash\`"
-      done < "$plan_work_dir/commits.tsv"
-    else
-      echo "  - (none)"
-    fi
-    echo "- **Pull requests:**"
-    if [ -f "$plan_work_dir/pull_requests.tsv" ]; then
-      while IFS=$'\t' read -r repo_name pr_url; do
-        echo "  - \`$repo_name\` — $pr_url"
-      done < "$plan_work_dir/pull_requests.tsv"
-    else
-      echo "  - (none)"
-    fi
-    echo ""
-    for r in $(seq 1 "$review_rounds_completed"); do
-      echo "### Review Round $r"
-      echo ""
-      if [ -f "$plan_work_dir/combined_review_$r.txt" ]; then
-        cat "$plan_work_dir/combined_review_$r.txt"
-      else
-        echo "(skipped)"
-      fi
-      echo ""
-    done
-  } > "$done_path"
-
-  rm "$plan_file"
-  rm -f "$plan_work_dir/pending"
-  rm -f "$plan_work_dir/state"
-  rm -f "$plan_work_dir/review_iterations"
-  log "Wrote done file: $done_name"
+  write_done_file "$plan_file" "$plan_name" "$plan_work_dir" "$reviews_successful" "$review_iterations"
 }
 
 # ─── Resume pending reviews ───
