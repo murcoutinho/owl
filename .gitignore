@@ -1,6 +1,9 @@
 # Plans (project-specific, not part of the tool)
 plan/
 !plan/.gitkeep
+plan/*.md
+plan/done/
+plan/.DS_Store
 
 # Work directories and logs
 .work/
