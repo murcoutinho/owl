@@ -659,6 +659,8 @@ execute_plan() {
   fi
 
   local branch_name="owl/${plan_name%.md}"
+  local execution_base_file="$plan_work_dir/execution_base.tsv"
+  : > "$execution_base_file"
 
   # Create a session ID for the Claude coder so the fix phase can --resume
   # into the same conversation and reuse file-read context. Sessions are
@@ -679,6 +681,13 @@ execute_plan() {
   while IFS= read -r -d '' repo_dir; do
     local repo_root
     repo_root="$(dirname "$repo_dir")"
+    local repo_name
+    repo_name="$(basename "$repo_root")"
+    local base_hash="NONE"
+    if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+      base_hash=$(git -C "$repo_root" rev-parse HEAD)
+    fi
+    printf '%s\t%s\t%s\n' "$repo_name" "$repo_root" "$base_hash" >> "$execution_base_file"
     if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
        ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
        [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
@@ -760,11 +769,13 @@ PLANEOF
       continue
     fi
 
-    # Capture the base commit (whatever was checked out before this plan ran —
-    # either main or the plan's declared base_branch). The reviewer uses this
-    # as the left side of the diff range.
     local base_hash="NONE"
-    if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+    local recorded_base=""
+    recorded_base=$(awk -F $'\t' -v repo="$repo_name" -v root="$repo_root" \
+      '$1 == repo && $2 == root { print $3; exit }' "$execution_base_file" 2>/dev/null || true)
+    if [ -n "$recorded_base" ]; then
+      base_hash="$recorded_base"
+    elif git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
       base_hash=$(git -C "$repo_root" rev-parse HEAD)
     fi
 
@@ -785,6 +796,12 @@ PLANEOF
 
     local after_hash
     after_hash=$(git -C "$repo_root" rev-parse HEAD)
+    if [ "$after_hash" = "$base_hash" ]; then
+      log "  $repo_name: WARNING — commit did not advance HEAD; skipping review manifest entry"
+      git -C "$repo_root" checkout main 2>>"$LOG_FILE" || true
+      git -C "$repo_root" branch -D "$branch_name" 2>>"$LOG_FILE" || true
+      continue
+    fi
     local short_hash
     short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
 
