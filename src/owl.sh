@@ -785,23 +785,39 @@ PLANEOF
     # Create new branch; if it already exists, delete it first (stale from a prior failed run)
     if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
       log "  $repo_name: deleting stale branch '$branch_name'"
-      git -C "$repo_root" branch -D "$branch_name" 2>>"$LOG_FILE"
+      if ! git -C "$repo_root" branch -D "$branch_name" 2>&1 | tee -a "$LOG_FILE"; then
+        log "  $repo_name: WARNING — could not delete stale branch (maybe checked out?)"
+      fi
     fi
-    # shellcheck disable=SC2129 # separate redirects are intentional here for clarity
-    git -C "$repo_root" checkout -b "$branch_name" 2>>"$LOG_FILE"
 
-    # Stage and commit
-    git -C "$repo_root" add -A 2>>"$LOG_FILE"
-    git -C "$repo_root" commit -m "[owl] ${plan_name%.md} — execution" 2>>"$LOG_FILE"
+    local checkout_err=""
+    checkout_err=$(git -C "$repo_root" checkout -b "$branch_name" 2>&1) || {
+      log "  $repo_name: ERROR — 'git checkout -b $branch_name' failed:"
+      log "  $checkout_err"
+      continue
+    }
+
+    # Stage all changes
+    local add_err=""
+    add_err=$(git -C "$repo_root" add -A 2>&1) || {
+      log "  $repo_name: ERROR — 'git add -A' failed:"
+      log "  $add_err"
+      continue
+    }
+
+    # Commit. Log the full error output on failure so we can diagnose
+    # issues like missing git user config, empty index, or hooks.
+    local commit_err=""
+    commit_err=$(git -C "$repo_root" commit -m "[owl] ${plan_name%.md} — execution" 2>&1) || {
+      log "  $repo_name: ERROR — 'git commit' failed. Worktree changes are preserved on branch '$branch_name' for investigation."
+      log "  git commit output: $commit_err"
+      log "  git status:"
+      git -C "$repo_root" status --short 2>&1 | while IFS= read -r line; do log "    $line"; done
+      continue
+    }
 
     local after_hash
     after_hash=$(git -C "$repo_root" rev-parse HEAD)
-    if [ "$after_hash" = "$base_hash" ]; then
-      log "  $repo_name: WARNING — commit did not advance HEAD; skipping review manifest entry"
-      git -C "$repo_root" checkout main 2>>"$LOG_FILE" || true
-      git -C "$repo_root" branch -D "$branch_name" 2>>"$LOG_FILE" || true
-      continue
-    fi
     local short_hash
     short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
 
@@ -814,6 +830,27 @@ PLANEOF
 
   # ── Check that something was actually committed ──
   if [ ! -s "$plan_work_dir/review_input_1.tsv" ]; then
+    # Distinguish "coder genuinely produced no changes" from "coder changed
+    # files but git commit failed silently". Check if any repo still has a
+    # dirty worktree — if so, the commit path above logged an ERROR and we
+    # should retry, not mark done.
+    local has_uncommitted_changes=false
+    while IFS= read -r -d '' repo_dir; do
+      local repo_root
+      repo_root="$(dirname "$repo_dir")"
+      if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
+         ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
+        has_uncommitted_changes=true
+        break
+      fi
+    done < <(find_target_repos)
+
+    if $has_uncommitted_changes; then
+      log "Plan produced changes but commits failed (see ERROR lines above). Will retry next cycle."
+      switch_all_to_main
+      return 1
+    fi
+
     log "Plan produced no changes in any repo. Marking done with no-op summary."
     log "[Step 5] Switching all repos back to main..."
     switch_all_to_main
