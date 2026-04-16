@@ -414,6 +414,21 @@ is_rate_limited() {
   echo "$output" | grep -qiE "rate.?limit|too many requests|429|overloaded|capacity|quota exceeded|try again"
 }
 
+rate_limit_excerpt() {
+  local output="$1"
+  python3 - "$output" <<'PY'
+import re
+import sys
+
+text = sys.argv[1]
+pattern = re.compile(r"rate.?limit|too many requests|429|overloaded|capacity|quota exceeded|try again", re.I)
+for line in text.splitlines():
+    if pattern.search(line):
+        print(line[:500])
+        break
+PY
+}
+
 retry_on_limit() {
   local desc="$1"
   shift
@@ -426,11 +441,13 @@ retry_on_limit() {
       return 0
     fi
     if is_rate_limited "$RETRY_OUTPUT"; then
+      local excerpt
+      excerpt="$(rate_limit_excerpt "$RETRY_OUTPUT")"
       if [ $attempt -ge $MAX_RETRIES ]; then
-        log "RATE LIMIT: $desc — gave up after $attempt attempts."
+        log "RATE LIMIT: $desc — gave up after $attempt attempts (exit=$rc). Trigger: ${excerpt:-<no matching line found>}"
         return 1
       fi
-      log "RATE LIMIT: $desc — attempt $attempt hit rate limit. Retrying in $((RETRY_WAIT / 60)) minutes..."
+      log "RATE LIMIT: $desc — attempt $attempt hit rate limit (exit=$rc). Trigger: ${excerpt:-<no matching line found>}. Retrying in $((RETRY_WAIT / 60)) minutes..."
       sleep $RETRY_WAIT
     else
       return $rc
