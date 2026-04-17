@@ -254,6 +254,184 @@ reviewer_slot_enabled() {
   return 0
 }
 
+repo_has_local_changes() {
+  local repo_root="$1"
+  if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
+     ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
+     [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+    return 0
+  fi
+  return 1
+}
+
+ensure_plan_branch_checked_out() {
+  local repo_root="$1"
+  local repo_name="$2"
+  local branch_name="$3"
+
+  local current_branch=""
+  current_branch="$(git -C "$repo_root" branch --show-current 2>/dev/null || true)"
+  if [ "$current_branch" = "$branch_name" ]; then
+    return 0
+  fi
+
+  if git -C "$repo_root" checkout "$branch_name" >/dev/null 2>>"$LOG_FILE"; then
+    return 0
+  fi
+
+  if ! repo_has_local_changes "$repo_root"; then
+    log "  $repo_name: ERROR — failed to checkout branch '$branch_name'"
+    return 1
+  fi
+
+  local stash_name
+  stash_name="owl-normalize-${branch_name//\//-}-$(date +%s)"
+  log "  $repo_name: stashing local changes to move them onto '$branch_name'"
+  local stash_output=""
+  stash_output=$(git -C "$repo_root" stash push -u -m "$stash_name" 2>&1) || {
+    log "  $repo_name: ERROR — failed to stash local changes before checkout"
+    log "  $stash_output"
+    return 1
+  }
+
+  if ! git -C "$repo_root" checkout "$branch_name" >/dev/null 2>>"$LOG_FILE"; then
+    log "  $repo_name: ERROR — failed to checkout branch '$branch_name' even after stashing"
+    return 1
+  fi
+
+  if git -C "$repo_root" stash list | grep -Fq "$stash_name"; then
+    local apply_output=""
+    apply_output=$(git -C "$repo_root" stash apply "stash^{/$stash_name}" 2>&1) || {
+      log "  $repo_name: ERROR — failed to reapply stashed changes on '$branch_name'"
+      log "  $apply_output"
+      return 1
+    }
+    git -C "$repo_root" stash drop "stash^{/$stash_name}" >/dev/null 2>>"$LOG_FILE" || true
+  fi
+
+  return 0
+}
+
+normalize_repo_changes_for_plan() {
+  local repo_root="$1"
+  local repo_name="$2"
+  local branch_name="$3"
+  local commit_message="$4"
+  local base_hash="$5"
+  local manifest_file="${6:-}"
+  local commits_file="${7:-}"
+  local branch_mode="${8:-reuse}"
+
+  if ! repo_has_local_changes "$repo_root"; then
+    return 0
+  fi
+
+  if [ "$branch_mode" = "create" ]; then
+    log "  $repo_name: changes detected → creating branch '$branch_name'"
+    if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
+      log "  $repo_name: deleting stale branch '$branch_name'"
+      if ! git -C "$repo_root" branch -D "$branch_name" 2>&1 | tee -a "$LOG_FILE"; then
+        log "  $repo_name: WARNING — could not delete stale branch (maybe checked out?)"
+      fi
+    fi
+
+    local checkout_err=""
+    checkout_err=$(git -C "$repo_root" checkout -b "$branch_name" 2>&1) || {
+      log "  $repo_name: ERROR — 'git checkout -b $branch_name' failed:"
+      log "  $checkout_err"
+      return 1
+    }
+  else
+    ensure_plan_branch_checked_out "$repo_root" "$repo_name" "$branch_name" || return 1
+  fi
+
+  if ! repo_has_local_changes "$repo_root"; then
+    return 0
+  fi
+
+  local before_hash="NONE"
+  if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+    before_hash="$(git -C "$repo_root" rev-parse HEAD)"
+  fi
+
+  local add_err=""
+  add_err=$(git -C "$repo_root" add -A 2>&1) || {
+    log "  $repo_name: ERROR — 'git add -A' failed:"
+    log "  $add_err"
+    return 1
+  }
+
+  local commit_output=""
+  commit_output=$(git -C "$repo_root" commit -m "$commit_message" 2>&1) || {
+    if printf '%s\n' "$commit_output" | grep -qi "nothing to commit"; then
+      return 0
+    fi
+    log "  $repo_name: ERROR — 'git commit' failed. Worktree changes are preserved on branch '$branch_name' for investigation."
+    log "  git commit output: $commit_output"
+    log "  git status:"
+    git -C "$repo_root" status --short 2>&1 | while IFS= read -r line; do log "    $line"; done
+    return 1
+  }
+
+  local after_hash
+  after_hash="$(git -C "$repo_root" rev-parse HEAD)"
+  local short_hash
+  short_hash="$(git -C "$repo_root" rev-parse --short HEAD)"
+  log "  $repo_name: committed ($short_hash)"
+
+  if [ -n "$manifest_file" ] && [ "$after_hash" != "$base_hash" ] && [ "$after_hash" != "$before_hash" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$base_hash" "$after_hash" >> "$manifest_file"
+  fi
+  if [ -n "$commits_file" ] && [ "$after_hash" != "$before_hash" ]; then
+    printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$commits_file"
+  fi
+  return 0
+}
+
+normalize_all_plan_repos() {
+  local branch_name="$1"
+  local commit_message="$2"
+  local plan_work_dir="$3"
+  local manifest_file="$4"
+  local branch_mode="${5:-reuse}"
+
+  local had_error=false
+  while IFS= read -r -d '' repo_dir; do
+    local repo_root repo_name base_hash recorded_base
+    repo_root="$(dirname "$repo_dir")"
+    repo_name="$(basename "$repo_root")"
+
+    if [ "$branch_mode" = "reuse" ] && \
+       ! git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1 && \
+       ! repo_has_local_changes "$repo_root"; then
+      continue
+    fi
+
+    base_hash="NONE"
+    recorded_base=$(awk -F $'\t' -v repo="$repo_name" -v root="$repo_root" \
+      '$1 == repo && $2 == root { print $3; exit }' "$plan_work_dir/execution_base.tsv" 2>/dev/null || true)
+    if [ -n "$recorded_base" ]; then
+      base_hash="$recorded_base"
+    elif git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+      base_hash="$(git -C "$repo_root" rev-parse HEAD)"
+    fi
+
+    if ! normalize_repo_changes_for_plan \
+      "$repo_root" \
+      "$repo_name" \
+      "$branch_name" \
+      "$commit_message" \
+      "$base_hash" \
+      "$manifest_file" \
+      "$plan_work_dir/commits.tsv" \
+      "$branch_mode"; then
+      had_error=true
+    fi
+  done < <(find_target_repos)
+
+  ! $had_error
+}
+
 # Print the plan file with YAML frontmatter (--- ... ---) stripped.
 strip_plan_frontmatter() {
   local plan_file="$1"
@@ -557,6 +735,8 @@ push_and_open_prs() {
     pr_base_branch="$(cat "$plan_work_dir/base_branch" 2>/dev/null)"
   fi
 
+  local had_pr_failure=false
+
   while IFS= read -r -d '' repo_dir; do
     local repo_root repo_name
     repo_root="$(dirname "$repo_dir")"
@@ -591,11 +771,13 @@ push_and_open_prs() {
 
     log "Pushing branch '$branch_name' in $repo_name (PR base: $repo_pr_base)..."
     if ! git -C "$repo_root" checkout "$branch_name" 2>>"$LOG_FILE"; then
-      log "  $repo_name: failed to checkout branch. Skipping PR."
+      log "  $repo_name: failed to checkout branch. PR creation failed."
+      had_pr_failure=true
       continue
     fi
     if ! git -C "$repo_root" push -u origin "$branch_name" 2>>"$LOG_FILE"; then
-      log "  $repo_name: push failed. Skipping PR."
+      log "  $repo_name: push failed. PR creation failed."
+      had_pr_failure=true
       continue
     fi
 
@@ -625,9 +807,12 @@ EOF
       echo "$repo_name	$pr_url" >> "$plan_work_dir/pull_requests.tsv"
     else
       log "Failed to create PR in $repo_name: $pr_url"
+      had_pr_failure=true
     fi
 
   done < <(find_target_repos)
+
+  ! $had_pr_failure
 }
 
 # ─── Step 8: Switch all repos back to main ───
@@ -768,82 +953,16 @@ PLANEOF
   # ── Step 4: Find dirty repos, create branch, commit ──
   log "[Step 4] Creating branch and committing changes..."
   : > "$plan_work_dir/review_input_1.tsv"
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root repo_name
-    repo_root="$(dirname "$repo_dir")"
-    repo_name="$(basename "$repo_root")"
-
-    # Skip repos with no changes
-    if git -C "$repo_root" diff --quiet 2>/dev/null && \
-       git -C "$repo_root" diff --cached --quiet 2>/dev/null && \
-       [ -z "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-      continue
-    fi
-
-    # Skip repos that were already dirty before execution (not our changes)
-    if grep -qxF "$repo_root" "$pre_dirty_file" 2>/dev/null; then
-      log "  $repo_name: SKIPPING — had pre-existing local changes"
-      continue
-    fi
-
-    local base_hash="NONE"
-    local recorded_base=""
-    recorded_base=$(awk -F $'\t' -v repo="$repo_name" -v root="$repo_root" \
-      '$1 == repo && $2 == root { print $3; exit }' "$execution_base_file" 2>/dev/null || true)
-    if [ -n "$recorded_base" ]; then
-      base_hash="$recorded_base"
-    elif git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      base_hash=$(git -C "$repo_root" rev-parse HEAD)
-    fi
-
-    log "  $repo_name: changes detected → creating branch '$branch_name'"
-
-    # Create and switch to branch
-    # Create new branch; if it already exists, delete it first (stale from a prior failed run)
-    if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
-      log "  $repo_name: deleting stale branch '$branch_name'"
-      if ! git -C "$repo_root" branch -D "$branch_name" 2>&1 | tee -a "$LOG_FILE"; then
-        log "  $repo_name: WARNING — could not delete stale branch (maybe checked out?)"
-      fi
-    fi
-
-    local checkout_err=""
-    checkout_err=$(git -C "$repo_root" checkout -b "$branch_name" 2>&1) || {
-      log "  $repo_name: ERROR — 'git checkout -b $branch_name' failed:"
-      log "  $checkout_err"
-      continue
-    }
-
-    # Stage all changes
-    local add_err=""
-    add_err=$(git -C "$repo_root" add -A 2>&1) || {
-      log "  $repo_name: ERROR — 'git add -A' failed:"
-      log "  $add_err"
-      continue
-    }
-
-    # Commit. Log the full error output on failure so we can diagnose
-    # issues like missing git user config, empty index, or hooks.
-    local commit_err=""
-    commit_err=$(git -C "$repo_root" commit -m "[owl] ${plan_name%.md} — execution" 2>&1) || {
-      log "  $repo_name: ERROR — 'git commit' failed. Worktree changes are preserved on branch '$branch_name' for investigation."
-      log "  git commit output: $commit_err"
-      log "  git status:"
-      git -C "$repo_root" status --short 2>&1 | while IFS= read -r line; do log "    $line"; done
-      continue
-    }
-
-    local after_hash
-    after_hash=$(git -C "$repo_root" rev-parse HEAD)
-    local short_hash
-    short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
-
-    log "  $repo_name: committed ($short_hash)"
-
-    printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$base_hash" "$after_hash" >> "$plan_work_dir/review_input_1.tsv"
-    printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
-
-  done < <(find_target_repos)
+  if ! normalize_all_plan_repos \
+    "$branch_name" \
+    "[owl] ${plan_name%.md} — execution" \
+    "$plan_work_dir" \
+    "$plan_work_dir/review_input_1.tsv" \
+    "create"; then
+    log "Plan produced changes but repo normalization failed during execution commit phase. Will retry next cycle."
+    switch_all_to_main
+    return 1
+  fi
 
   # ── Check that something was actually committed ──
   if [ ! -s "$plan_work_dir/review_input_1.tsv" ]; then
@@ -1288,41 +1407,18 @@ FIXEOF
       break
     fi
 
-    # Commit fixes in repos on the branch that have changes
     local next_manifest="$plan_work_dir/review_input_$((i + 1)).tsv"
-    : > "$next_manifest"
-    while IFS= read -r -d '' repo_dir; do
-      local repo_root repo_name
-      repo_root="$(dirname "$repo_dir")"
-      repo_name="$(basename "$repo_root")"
-      local current_branch
-      current_branch=$(git -C "$repo_root" branch --show-current 2>/dev/null)
-
-      # Only commit in repos on the plan's branch with changes
-      if [ "$current_branch" != "$branch_name" ]; then
-        continue
-      fi
-      if git -C "$repo_root" diff --quiet 2>/dev/null && \
-         git -C "$repo_root" diff --cached --quiet 2>/dev/null && \
-         [ -z "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-        continue
-      fi
-
-      local before_hash
-      before_hash=$(git -C "$repo_root" rev-parse HEAD)
-
-      git -C "$repo_root" add -A 2>/dev/null
-      git -C "$repo_root" commit -m "[owl] ${plan_name%.md} — review fix iteration $i" 2>/dev/null
-
-      local after_hash
-      after_hash=$(git -C "$repo_root" rev-parse HEAD)
-      local short_hash
-      short_hash=$(git -C "$repo_root" rev-parse --short HEAD)
-
-      log "  $repo_name: fix committed ($short_hash)"
-      printf '%s\t%s\t%s\t%s\n' "$repo_name" "$repo_root" "$before_hash" "$after_hash" >> "$next_manifest"
-      printf '%s\t%s\n' "$repo_name" "$short_hash" >> "$plan_work_dir/commits.tsv"
-    done < <(find_target_repos)
+    cp "$manifest" "$next_manifest" 2>/dev/null || : > "$next_manifest"
+    if ! normalize_all_plan_repos \
+      "$branch_name" \
+      "[owl] ${plan_name%.md} — review fix iteration $i" \
+      "$plan_work_dir" \
+      "$next_manifest" \
+      "reuse"; then
+      log "Fix phase left repos in a dirty or uncommittable state. Will retry next cycle."
+      switch_all_to_main
+      return 1
+    fi
 
     review_rounds_completed=$i
     echo "reviews_done=$i" > "$plan_work_dir/state"
@@ -1365,8 +1461,22 @@ FIXEOF
   # ── Step 7: Push and open PRs ──
   local reviews_successful=$(( review_rounds_completed > reviews_skipped ? review_rounds_completed - reviews_skipped : 0 ))
   if [ -n "$branch_name" ]; then
+    if ! normalize_all_plan_repos \
+      "$branch_name" \
+      "[owl] ${plan_name%.md} — pre-push normalization" \
+      "$plan_work_dir" \
+      "$plan_work_dir/review_input_$((review_rounds_completed + 1)).tsv" \
+      "reuse"; then
+      log "Pre-push normalization failed. Will retry next cycle."
+      switch_all_to_main
+      return 1
+    fi
     log "[Step 7] Pushing branches and opening PRs..."
-    push_and_open_prs "$branch_name" "$plan_name" "$plan_file" "$plan_work_dir" "$reviews_successful" "$review_iterations"
+    if ! push_and_open_prs "$branch_name" "$plan_name" "$plan_file" "$plan_work_dir" "$reviews_successful" "$review_iterations"; then
+      log "PR creation failed for at least one touched repo. Will retry next cycle."
+      switch_all_to_main
+      return 1
+    fi
   fi
 
   # ── Step 8: Switch back to main ──
