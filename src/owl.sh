@@ -284,7 +284,8 @@ ensure_plan_branch_checked_out() {
     return 1
   fi
 
-  local stash_name="owl-normalize-${branch_name//\//-}-$(date +%s)"
+  local stash_name
+  stash_name="owl-normalize-${branch_name//\//-}-$(date +%s)"
   log "  $repo_name: stashing local changes to move them onto '$branch_name'"
   local stash_output=""
   stash_output=$(git -C "$repo_root" stash push -u -m "$stash_name" 2>&1) || {
