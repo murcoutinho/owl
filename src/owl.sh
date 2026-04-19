@@ -956,6 +956,8 @@ $plan_content
 IMPORTANT INSTRUCTIONS:
 - Do NOT commit, push, or create branches. Just write the code changes.
 - The agent handles all git operations.
+- As the very first line of your response, before any other output or tool call, print exactly: __OWL_ACK__ coder started
+  (This is a proof-of-life marker the harness looks for. Do not prefix, translate, or decorate it.)
 PLANEOF
 
   run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file" "$coder_session_id" "create"
@@ -1238,6 +1240,9 @@ run_review_loop() {
     {
       echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Judge the diff against the plan below — if a change looks surprising but matches what the plan explicitly asked for, that is NOT a bug and must not be flagged. Only flag things that are wrong relative to the plan or introduce genuine defects (security, correctness, crashes, obviously broken logic). Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
       echo ""
+      echo "Before you analyze anything — as the very first line of your response, before any tool call or other output — print exactly: __OWL_ACK__ reviewer started"
+      echo "This is a proof-of-life marker the harness looks for; do not prefix, translate, or decorate it. The harness strips it before checking your final verdict, so it does not break the LGTM contract."
+      echo ""
       echo "## Plan being implemented"
       echo ""
       if [ -n "$plan_content" ]; then
@@ -1384,8 +1389,11 @@ $(cat "$tests_summary_file")"
     review_rounds_completed=$i
 
     local reviewer1_trimmed reviewer2_trimmed
-    reviewer1_trimmed=$(echo "$reviewer1_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    reviewer2_trimmed=$(echo "$reviewer2_review" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Strip OWL_ACK proof-of-life lines (added by prompt guidance) so they don't
+    # break the exact-match LGTM fast-path below. Raw reviewer_*.txt files on
+    # disk keep the ack line for operator visibility.
+    reviewer1_trimmed=$(echo "$reviewer1_review" | grep -v '^__OWL_ACK__' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    reviewer2_trimmed=$(echo "$reviewer2_review" | grep -v '^__OWL_ACK__' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     if $tests_ok && \
        { ! $reviewer1_enabled || [ "$reviewer1_trimmed" = "LGTM" ]; } && \
@@ -1402,6 +1410,9 @@ $(cat "$tests_summary_file")"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
     cat > "$fix_prompt_file" <<FIXEOF
+As the very first line of your response, before any tool call or other output, print exactly: __OWL_ACK__ fix-agent started
+(Proof-of-life marker the harness looks for. Do not prefix, translate, or decorate it.)
+
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
 How to handle conflicts between the plan and the reviewers:
