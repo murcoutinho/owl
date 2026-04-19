@@ -683,7 +683,13 @@ retry_on_limit() {
     attempt=$((attempt + 1))
     local rc=0
     RETRY_OUTPUT=$("$@" 2>&1) || rc=$?
-    if [ $rc -eq 0 ] && ! is_rate_limited "$RETRY_OUTPUT"; then
+    # If the underlying command succeeded, trust it — never second-guess based
+    # on output prose. The is_rate_limited grep matches phrases like "rate
+    # limit" wherever they appear (including inside echoed user prompts and
+    # ordinary review feedback that discusses rate limiting). Without this
+    # short-circuit we'd false-positive on every plan or diff that mentions
+    # the words "rate limit", and sleep 10 minutes for nothing.
+    if [ $rc -eq 0 ]; then
       return 0
     fi
     if is_rate_limited "$RETRY_OUTPUT"; then
