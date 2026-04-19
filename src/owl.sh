@@ -754,19 +754,29 @@ retry_on_limit() {
 
     # Run the LLM in the background with its stdout+stderr captured to a
     # tempfile (not via $(...) — we need a PID we can kill on timeout).
+    # Wrap via perl+POSIX::setsid so the LLM and all its descendants share
+    # a fresh process group; killing `-$pgid` then reliably reaps the
+    # entire tree in one go, avoiding the kill_tree race where a dying
+    # wrapper orphans its grandchildren before pgrep can see them.
     local llm_tmp
     llm_tmp=$(mktemp -t owl_llm_out.XXXXXX)
-    "$@" >"$llm_tmp" 2>&1 &
+    perl -e 'use POSIX; POSIX::setsid() or die "setsid: $!"; exec @ARGV' "$@" \
+      >"$llm_tmp" 2>&1 &
     local llm_pid=$!
+    # In the new session the LLM's PID == its PGID.
+    local llm_pgid="$llm_pid"
 
-    # Timeout watcher: kill the LLM tree after LLM_TIMEOUT seconds if it
-    # hasn't returned. Uses kill_tree to reap grandchildren (bash wrapper →
-    # node → codex binary). SIGTERM first; SIGKILL 3s later as fallback.
+    # Timeout watcher: kill the whole process group after LLM_TIMEOUT
+    # seconds if the LLM hasn't returned. SIGTERM first; SIGKILL 3s later
+    # as fallback. kill_tree is a belt-and-braces backup in case the
+    # process-group kill ever misses something.
     (
       sleep "$LLM_TIMEOUT"
       if kill -0 "$llm_pid" 2>/dev/null; then
+        kill -TERM "-$llm_pgid" 2>/dev/null || true
         kill_tree "$llm_pid" TERM
         sleep 3
+        kill -KILL "-$llm_pgid" 2>/dev/null || true
         kill_tree "$llm_pid" KILL
       fi
     ) >/dev/null 2>&1 &
