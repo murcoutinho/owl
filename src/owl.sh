@@ -628,28 +628,8 @@ retry_on_limit() {
         log "RATE LIMIT: $desc — gave up after $attempt attempts (exit=$rc). Trigger: ${excerpt:-<no matching line found>}"
         return 1
       fi
-      local wait_minutes=$((RETRY_WAIT / 60))
-      local next_attempt=$((attempt + 1))
-      local resume_epoch=$(( $(date +%s) + RETRY_WAIT ))
-      local resume_time
-      resume_time=$(date -r "$resume_epoch" '+%H:%M:%S' 2>/dev/null || date -d "@$resume_epoch" '+%H:%M:%S' 2>/dev/null || echo "unknown")
-      log "RATE LIMIT: $desc — attempt $attempt/$MAX_RETRIES flagged (exit=$rc). Trigger: ${excerpt:-<no matching line found>}"
-      log "RATE LIMIT: waiting $wait_minutes minutes before attempt $next_attempt/$MAX_RETRIES (resume at $resume_time). Interrupt owl.sh to abort."
-      # Heartbeat during the wait so the log doesn't go silent for 10 minutes.
-      local heartbeat_interval=120
-      local waited=0
-      while [ $waited -lt $RETRY_WAIT ]; do
-        local chunk=$heartbeat_interval
-        local remaining=$((RETRY_WAIT - waited))
-        if [ $chunk -gt $remaining ]; then chunk=$remaining; fi
-        sleep "$chunk"
-        waited=$((waited + chunk))
-        local left=$((RETRY_WAIT - waited))
-        if [ $left -gt 0 ]; then
-          log "RATE LIMIT: still waiting — ${left}s left until retry at $resume_time (attempt $next_attempt/$MAX_RETRIES)"
-        fi
-      done
-      log "RATE LIMIT: wait finished — starting attempt $next_attempt/$MAX_RETRIES for $desc"
+      log "RATE LIMIT: $desc — attempt $attempt hit rate limit (exit=$rc). Trigger: ${excerpt:-<no matching line found>}. Retrying in $((RETRY_WAIT / 60)) minutes..."
+      sleep $RETRY_WAIT
     else
       return $rc
     fi
