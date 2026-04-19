@@ -589,32 +589,56 @@ run_llm() {
   # Sessions are directory-scoped — both calls must run from the same cwd.
   local session_mode="${5:-create}"
 
+  local prompt_name
+  prompt_name=$(basename "$prompt_file")
+  local session_info=""
+  [ -n "$session_id" ] && session_info=" session=${session_id:0:8}($session_mode)"
+  local llm_tag="$provider $model [$prompt_name]$session_info"
+
+  local start_ts
+  start_ts=$(date +%s)
+  log "LLM START: $llm_tag"
+
+  local _llm_rc=0
   case "$provider" in
     claude)
       if [ -n "$session_id" ] && [ "$session_mode" = "resume" ]; then
         # shellcheck disable=SC2016
-        retry_on_limit "Claude run (resume)" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --resume "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+        retry_on_limit "$llm_tag" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --resume "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file" || _llm_rc=$?
       elif [ -n "$session_id" ]; then
         # shellcheck disable=SC2016
-        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
+        retry_on_limit "$llm_tag" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file" || _llm_rc=$?
       else
         # shellcheck disable=SC2016
-        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
+        retry_on_limit "$llm_tag" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file" || _llm_rc=$?
       fi
       ;;
     codex)
       # shellcheck disable=SC2016
-      retry_on_limit "Codex run" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file"
+      retry_on_limit "$llm_tag" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file" || _llm_rc=$?
       ;;
     none)
       RETRY_OUTPUT=""
+      log "LLM DONE: $llm_tag — skipped (provider=none)"
       return 0
       ;;
     *)
-      log "Invalid provider '$provider'. Expected claude, codex, or none."
+      log "LLM FAILED: invalid provider '$provider' (expected claude, codex, or none)"
       return 1
       ;;
   esac
+
+  local elapsed=$(( $(date +%s) - start_ts ))
+  local min=$((elapsed / 60))
+  local sec=$((elapsed % 60))
+  if [ $_llm_rc -eq 0 ]; then
+    log "LLM DONE: $llm_tag — success, elapsed ${min}m${sec}s, ${#RETRY_OUTPUT} chars"
+  else
+    local tail_line
+    tail_line=$(printf '%s\n' "$RETRY_OUTPUT" | grep -v '^[[:space:]]*$' | tail -n 1 | head -c 300)
+    log "LLM FAILED: $llm_tag — exit=$_llm_rc, elapsed ${min}m${sec}s. Last output line: ${tail_line:-<empty>}"
+  fi
+  return $_llm_rc
 }
 
 get_or_create_coder_session_id() {
@@ -681,8 +705,33 @@ retry_on_limit() {
   local attempt=0
   while true; do
     attempt=$((attempt + 1))
+    if [ $attempt -gt 1 ]; then
+      log "LLM ATTEMPT: $desc — retry $attempt/$MAX_RETRIES starting"
+    fi
+
+    # In-flight heartbeat — emits a "WORKING" line every 5 min so the console
+    # never goes silent for longer than that while the LLM is executing.
+    # Killed the instant the CLI returns (success or failure). `disown`
+    # before kill suppresses bash's "Terminated: 15" job-control notice.
+    local heartbeat_pid
+    (
+      local waited=0
+      while sleep 300; do
+        waited=$((waited + 300))
+        log "LLM WORKING: $desc — still running after $((waited / 60))m..."
+      done
+    ) 2>/dev/null &
+    heartbeat_pid=$!
+
     local rc=0
     RETRY_OUTPUT=$("$@" 2>&1) || rc=$?
+
+    # Stop the heartbeat and its sleep child deterministically. pkill -P
+    # catches the inner `sleep` in case the subshell kill doesn't propagate.
+    disown "$heartbeat_pid" 2>/dev/null || true
+    kill "$heartbeat_pid" 2>/dev/null || true
+    pkill -P "$heartbeat_pid" 2>/dev/null || true
+
     # If the underlying command succeeded, trust it — never second-guess based
     # on output prose. The is_rate_limited grep matches phrases like "rate
     # limit" wherever they appear (including inside echoed user prompts and
@@ -696,11 +745,31 @@ retry_on_limit() {
       local excerpt
       excerpt="$(rate_limit_excerpt "$RETRY_OUTPUT")"
       if [ $attempt -ge $MAX_RETRIES ]; then
-        log "RATE LIMIT: $desc — gave up after $attempt attempts (exit=$rc). Trigger: ${excerpt:-<no matching line found>}"
+        log "LLM RATE-LIMITED: $desc — gave up after $attempt attempts (exit=$rc). Trigger: ${excerpt:-<no matching line found>}"
         return 1
       fi
-      log "RATE LIMIT: $desc — attempt $attempt hit rate limit (exit=$rc). Trigger: ${excerpt:-<no matching line found>}. Retrying in $((RETRY_WAIT / 60)) minutes..."
-      sleep $RETRY_WAIT
+      local wait_minutes=$((RETRY_WAIT / 60))
+      local next_attempt=$((attempt + 1))
+      local resume_epoch=$(( $(date +%s) + RETRY_WAIT ))
+      local resume_time
+      resume_time=$(date -r "$resume_epoch" '+%H:%M:%S' 2>/dev/null || date -d "@$resume_epoch" '+%H:%M:%S' 2>/dev/null || echo "?")
+      log "LLM RATE-LIMITED: $desc — attempt $attempt/$MAX_RETRIES (exit=$rc). Trigger: ${excerpt:-<no matching line found>}"
+      log "LLM BACKOFF: waiting $wait_minutes min before attempt $next_attempt/$MAX_RETRIES (resume at $resume_time). Interrupt owl.sh to abort."
+      # Backoff heartbeat — 5-min ticks during the sleep so the log keeps
+      # breathing at the same cadence as the in-flight heartbeat above.
+      local backoff_waited=0
+      while [ $backoff_waited -lt $RETRY_WAIT ]; do
+        local chunk=300
+        local remaining=$((RETRY_WAIT - backoff_waited))
+        [ $chunk -gt $remaining ] && chunk=$remaining
+        sleep "$chunk"
+        backoff_waited=$((backoff_waited + chunk))
+        local left=$((RETRY_WAIT - backoff_waited))
+        if [ $left -gt 0 ]; then
+          log "LLM BACKOFF: still waiting ${left}s until retry at $resume_time"
+        fi
+      done
+      log "LLM BACKOFF: wait finished — starting attempt $next_attempt/$MAX_RETRIES"
     else
       return $rc
     fi
