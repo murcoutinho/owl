@@ -189,6 +189,15 @@ spawn_ack_watcher() {
   # $2: ack file path to watch
   # $3: (optional) timeout in seconds; default 3600 (1h)
   # Emits the watcher PID on stdout.
+  #
+  # CRITICAL: this function is called via command substitution
+  # (`pid=$(spawn_ack_watcher ...)`). A backgrounded subshell inherits the
+  # parent's stdout (the $() pipe) and keeps it open until the subshell
+  # exits — which means $() would block for the watcher's entire lifetime,
+  # deadlocking the caller before run_llm ever starts. We redirect the
+  # subshell's stdout/stderr to /dev/null to detach it from the pipe;
+  # log() still writes to $LOG_FILE via `tee -a`, so its output lands in
+  # agent.log as intended.
   local label="$1"
   local ack_file="$2"
   local timeout_secs="${3:-3600}"
@@ -202,7 +211,7 @@ spawn_ack_watcher() {
       sleep 2
       waited=$((waited + 2))
     done
-  ) &
+  ) >/dev/null 2>&1 &
   echo $!
 }
 
