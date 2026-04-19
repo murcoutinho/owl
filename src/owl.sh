@@ -35,6 +35,10 @@ REVIEW_ITERATIONS=2
 MAX_REVIEW_ROUNDS=3
 RETRY_WAIT=300
 MAX_RETRIES=2
+# Hard timeout on any single LLM subprocess. Prevents a stuck claude/codex CLI
+# from hanging Owl indefinitely while only emitting heartbeats. Override via
+# OWL_LLM_TIMEOUT in .env.local if 25 min isn't enough for the real workloads.
+LLM_TIMEOUT="${OWL_LLM_TIMEOUT:-1500}"
 POLL_INTERVAL_SECONDS="${OWL_POLL_INTERVAL_SECONDS:-600}"
 
 # Providers / models
@@ -148,6 +152,22 @@ find_target_repos() {
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Recursively kill a process tree. Used by the LLM timeout watcher to reap
+# the full tree (bash -c → node → codex binary, etc.); plain `kill $pid`
+# on the wrapper bash doesn't propagate to grandchildren on macOS.
+kill_tree() {
+  local pid="$1"
+  local sig="${2:-TERM}"
+  [ -z "$pid" ] && return 0
+  local children
+  children=$(pgrep -P "$pid" 2>/dev/null || true)
+  local c
+  for c in $children; do
+    kill_tree "$c" "$sig"
+  done
+  kill -"$sig" "$pid" 2>/dev/null || true
 }
 
 # ── Proof-of-life ack helpers ──────────────────────────────────────────
@@ -732,14 +752,57 @@ retry_on_limit() {
     ) 2>/dev/null &
     heartbeat_pid=$!
 
+    # Run the LLM in the background with its stdout+stderr captured to a
+    # tempfile (not via $(...) — we need a PID we can kill on timeout).
+    local llm_tmp
+    llm_tmp=$(mktemp -t owl_llm_out.XXXXXX)
+    "$@" >"$llm_tmp" 2>&1 &
+    local llm_pid=$!
+
+    # Timeout watcher: kill the LLM tree after LLM_TIMEOUT seconds if it
+    # hasn't returned. Uses kill_tree to reap grandchildren (bash wrapper →
+    # node → codex binary). SIGTERM first; SIGKILL 3s later as fallback.
+    (
+      sleep "$LLM_TIMEOUT"
+      if kill -0 "$llm_pid" 2>/dev/null; then
+        kill_tree "$llm_pid" TERM
+        sleep 3
+        kill_tree "$llm_pid" KILL
+      fi
+    ) >/dev/null 2>&1 &
+    local timeout_pid=$!
+
     local rc=0
-    RETRY_OUTPUT=$("$@" 2>&1) || rc=$?
+    wait "$llm_pid" 2>/dev/null || rc=$?
+
+    # Did the timeout fire? A killed-by-signal child returns 128+sig.
+    local timed_out=false
+    if [ $rc -eq 143 ] || [ $rc -eq 137 ]; then
+      timed_out=true
+    fi
+
+    # Reap the output and stop the timeout watcher (may already have fired).
+    RETRY_OUTPUT=$(cat "$llm_tmp" 2>/dev/null || true)
+    rm -f "$llm_tmp"
+    disown "$timeout_pid" 2>/dev/null || true
+    kill "$timeout_pid" 2>/dev/null || true
+    pkill -P "$timeout_pid" 2>/dev/null || true
 
     # Stop the heartbeat and its sleep child deterministically. pkill -P
     # catches the inner `sleep` in case the subshell kill doesn't propagate.
     disown "$heartbeat_pid" 2>/dev/null || true
     kill "$heartbeat_pid" 2>/dev/null || true
     pkill -P "$heartbeat_pid" 2>/dev/null || true
+
+    # Hard timeout is a terminal failure for this call — don't retry. Rate-
+    # limit loops would eat another 2×(25m + 5m) = 60m if we retried, and
+    # timeouts usually mean the CLI is wedged, not rate-limited.
+    if $timed_out; then
+      local tail_line
+      tail_line=$(printf '%s\n' "$RETRY_OUTPUT" | grep -v '^[[:space:]]*$' | tail -n 1 | head -c 300)
+      log "LLM TIMEOUT: $desc — killed after $((LLM_TIMEOUT / 60))m (exit=$rc). Last output line: ${tail_line:-<empty>}"
+      return 124
+    fi
 
     # If the underlying command succeeded, trust it — never second-guess based
     # on output prose. The is_rate_limited grep matches phrases like "rate
