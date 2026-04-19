@@ -524,35 +524,25 @@ run_llm() {
   # Sessions are directory-scoped — both calls must run from the same cwd.
   local session_mode="${5:-create}"
 
-  local _llm_start_ts
-  _llm_start_ts=$(date +%s)
-  local _llm_session_label=""
-  if [ -n "$session_id" ]; then
-    _llm_session_label=" session=${session_id:0:8} mode=$session_mode"
-  fi
-  log "LLM START: provider=$provider model=$model prompt=$(basename "$prompt_file") pid=$$${_llm_session_label}"
-
-  local _llm_rc=0
   case "$provider" in
     claude)
       if [ -n "$session_id" ] && [ "$session_mode" = "resume" ]; then
         # shellcheck disable=SC2016
-        retry_on_limit "Claude run (resume)" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --resume "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file" || _llm_rc=$?
+        retry_on_limit "Claude run (resume)" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --resume "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
       elif [ -n "$session_id" ]; then
         # shellcheck disable=SC2016
-        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file" || _llm_rc=$?
+        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" --session-id "$2" - < "$3"' _ "$model" "$session_id" "$prompt_file"
       else
         # shellcheck disable=SC2016
-        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file" || _llm_rc=$?
+        retry_on_limit "Claude run" bash -c 'claude --print --dangerously-skip-permissions --model "$1" - < "$2"' _ "$model" "$prompt_file"
       fi
       ;;
     codex)
       # shellcheck disable=SC2016
-      retry_on_limit "Codex run" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file" || _llm_rc=$?
+      retry_on_limit "Codex run" bash -c 'codex exec --full-auto --skip-git-repo-check --model "$1" - < "$2"' _ "$model" "$prompt_file"
       ;;
     none)
       RETRY_OUTPUT=""
-      log "LLM DONE: provider=none model=$model (no-op) elapsed=0s"
       return 0
       ;;
     *)
@@ -560,11 +550,6 @@ run_llm() {
       return 1
       ;;
   esac
-
-  local _llm_elapsed=$(( $(date +%s) - _llm_start_ts ))
-  local _llm_output_chars=${#RETRY_OUTPUT}
-  log "LLM DONE: provider=$provider model=$model exit=$_llm_rc elapsed=${_llm_elapsed}s output_chars=$_llm_output_chars"
-  return $_llm_rc
 }
 
 get_or_create_coder_session_id() {
@@ -1281,10 +1266,8 @@ run_review_loop() {
           exit $rc
         ) > "$reviewer1_file" 2>&1 &
         reviewer1_pid=$!
-        log "  Reviewer 1 spawned: $REVIEWER1_LABEL provider=$REVIEWER1_PROVIDER model=$REVIEWER1_MODEL pid=$reviewer1_pid"
       else
         echo "LGTM" > "$reviewer1_file"
-        log "  Reviewer 1 disabled (provider=$REVIEWER1_PROVIDER model=$REVIEWER1_MODEL) — auto-LGTM"
       fi
 
       if $reviewer2_enabled; then
@@ -1295,10 +1278,8 @@ run_review_loop() {
           exit $rc
         ) > "$reviewer2_file" 2>&1 &
         reviewer2_pid=$!
-        log "  Reviewer 2 spawned: $REVIEWER2_LABEL provider=$REVIEWER2_PROVIDER model=$REVIEWER2_MODEL pid=$reviewer2_pid"
       else
         echo "LGTM" > "$reviewer2_file"
-        log "  Reviewer 2 disabled (provider=$REVIEWER2_PROVIDER model=$REVIEWER2_MODEL) — auto-LGTM"
       fi
 
       if [ -n "$reviewer1_pid" ]; then
