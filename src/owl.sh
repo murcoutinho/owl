@@ -150,6 +150,71 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# ── Proof-of-life ack helpers ──────────────────────────────────────────
+#
+# run_llm captures the LLM's stdout via `RETRY_OUTPUT=$("$@" 2>&1)`, which
+# blocks until completion — so the model's streamed output is invisible
+# mid-flight. To get live proof-of-life we instead tell the agent (via
+# prompt guidance) to touch a sentinel file on disk as its FIRST tool
+# call. A background watcher polls that path and logs a one-shot "alive"
+# line to agent.log as soon as the file appears. This bypasses the
+# command-substitution buffering entirely because filesystem side effects
+# are immediate.
+
+prepend_ack_prompt() {
+  # $1: absolute path the agent should write to as its first tool call
+  # $2: base prompt file (existing content, unchanged on disk)
+  # $3: output path for the wrapped prompt
+  local ack_path="$1"
+  local base_prompt="$2"
+  local out="$3"
+  rm -f "$ack_path" 2>/dev/null || true
+  {
+    echo "PROOF-OF-LIFE REQUIREMENT"
+    echo ""
+    echo "Your VERY FIRST action MUST be a tool call that writes the single word 'alive' to the absolute path below. Do this BEFORE reading any diff, running any git command, or thinking about the task. The harness cannot see your stdout while you are running — only files on disk — so this is how we confirm you are alive."
+    echo ""
+    echo "ACK_FILE_PATH: $ack_path"
+    echo ""
+    echo "After writing the ack file, proceed with the rest of the task below."
+    echo ""
+    echo "---"
+    echo ""
+    cat "$base_prompt"
+  } > "$out"
+}
+
+spawn_ack_watcher() {
+  # $1: human-readable label for the log line
+  # $2: ack file path to watch
+  # $3: (optional) timeout in seconds; default 3600 (1h)
+  # Emits the watcher PID on stdout.
+  local label="$1"
+  local ack_file="$2"
+  local timeout_secs="${3:-3600}"
+  (
+    local waited=0
+    while [ $waited -lt $timeout_secs ]; do
+      if [ -f "$ack_file" ]; then
+        log "  [$label] agent alive — wrote ack file $ack_file"
+        exit 0
+      fi
+      sleep 2
+      waited=$((waited + 2))
+    done
+  ) &
+  echo $!
+}
+
+stop_ack_watcher() {
+  # Best-effort cleanup. Safe to call with an empty / already-dead PID.
+  local pid="$1"
+  [ -z "$pid" ] && return 0
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 0
+}
+
 # Run any deterministic (non-LLM) test commands configured for the target repos.
 #
 # For each repo in TARGET_REPOS, looks up the env var
@@ -923,8 +988,15 @@ IMPORTANT INSTRUCTIONS:
 - The agent handles all git operations.
 PLANEOF
 
-  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$plan_prompt_file" "$coder_session_id" "create"
+  local coder_ack_file="$plan_work_dir/coder.ack"
+  local coder_prompt_wrapped="$plan_work_dir/plan_prompt_wrapped.txt"
+  prepend_ack_prompt "$coder_ack_file" "$plan_prompt_file" "$coder_prompt_wrapped"
+  local coder_ack_watcher
+  coder_ack_watcher=$(spawn_ack_watcher "coder" "$coder_ack_file")
+
+  run_llm "$IMPL_PROVIDER" "$IMPL_MODEL" "$coder_prompt_wrapped" "$coder_session_id" "create"
   local exit_code=$?
+  stop_ack_watcher "$coder_ack_watcher"
   local exec_output="$RETRY_OUTPUT"
   echo "$exec_output" >> "$LOG_FILE"
   echo "$exec_output" > "$plan_work_dir/execution.log"
@@ -1232,6 +1304,19 @@ run_review_loop() {
     reviewer_slot_enabled "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" || reviewer1_enabled=false
     reviewer_slot_enabled "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" || reviewer2_enabled=false
 
+    local reviewer1_ack_file="$plan_work_dir/reviewer1_$i.ack"
+    local reviewer2_ack_file="$plan_work_dir/reviewer2_$i.ack"
+    local reviewer1_prompt_wrapped="$plan_work_dir/reviewer1_prompt_$i.txt"
+    local reviewer2_prompt_wrapped="$plan_work_dir/reviewer2_prompt_$i.txt"
+    local reviewer1_ack_watcher=""
+    local reviewer2_ack_watcher=""
+    if $reviewer1_enabled; then
+      prepend_ack_prompt "$reviewer1_ack_file" "$review_prompt_file" "$reviewer1_prompt_wrapped"
+    fi
+    if $reviewer2_enabled; then
+      prepend_ack_prompt "$reviewer2_ack_file" "$review_prompt_file" "$reviewer2_prompt_wrapped"
+    fi
+
     if [ "$REVIEW_MODE" = "parallel" ]; then
       log "Spawning reviewers in parallel..."
 
@@ -1241,11 +1326,12 @@ run_review_loop() {
       if $reviewer1_enabled; then
         (
           rc=0
-          run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$review_prompt_file" || rc=$?
+          run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$reviewer1_prompt_wrapped" || rc=$?
           echo "$RETRY_OUTPUT"
           exit $rc
         ) > "$reviewer1_file" 2>&1 &
         reviewer1_pid=$!
+        reviewer1_ack_watcher=$(spawn_ack_watcher "reviewer1 $REVIEWER1_LABEL" "$reviewer1_ack_file")
       else
         echo "LGTM" > "$reviewer1_file"
       fi
@@ -1253,11 +1339,12 @@ run_review_loop() {
       if $reviewer2_enabled; then
         (
           rc=0
-          run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$review_prompt_file" || rc=$?
+          run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$reviewer2_prompt_wrapped" || rc=$?
           echo "$RETRY_OUTPUT"
           exit $rc
         ) > "$reviewer2_file" 2>&1 &
         reviewer2_pid=$!
+        reviewer2_ack_watcher=$(spawn_ack_watcher "reviewer2 $REVIEWER2_LABEL" "$reviewer2_ack_file")
       else
         echo "LGTM" > "$reviewer2_file"
       fi
@@ -1265,11 +1352,13 @@ run_review_loop() {
       if [ -n "$reviewer1_pid" ]; then
         wait "$reviewer1_pid" || reviewer1_ok=false
       fi
+      stop_ack_watcher "$reviewer1_ack_watcher"
       log "$REVIEWER1_LABEL review complete (enabled=$reviewer1_enabled success=$reviewer1_ok)."
 
       if [ -n "$reviewer2_pid" ]; then
         wait "$reviewer2_pid" || reviewer2_ok=false
       fi
+      stop_ack_watcher "$reviewer2_ack_watcher"
       log "$REVIEWER2_LABEL review complete (enabled=$reviewer2_enabled success=$reviewer2_ok)."
 
     else
@@ -1277,12 +1366,14 @@ run_review_loop() {
 
       if $reviewer1_enabled; then
         log "Running $REVIEWER1_LABEL reviewer..."
+        reviewer1_ack_watcher=$(spawn_ack_watcher "reviewer1 $REVIEWER1_LABEL" "$reviewer1_ack_file")
         (
           rc=0
-          run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$review_prompt_file" || rc=$?
+          run_llm "$REVIEWER1_PROVIDER" "$REVIEWER1_MODEL" "$reviewer1_prompt_wrapped" || rc=$?
           echo "$RETRY_OUTPUT"
           exit $rc
         ) > "$reviewer1_file" 2>&1 || reviewer1_ok=false
+        stop_ack_watcher "$reviewer1_ack_watcher"
       else
         echo "LGTM" > "$reviewer1_file"
       fi
@@ -1290,12 +1381,14 @@ run_review_loop() {
 
       if $reviewer2_enabled; then
         log "Running $REVIEWER2_LABEL reviewer..."
+        reviewer2_ack_watcher=$(spawn_ack_watcher "reviewer2 $REVIEWER2_LABEL" "$reviewer2_ack_file")
         (
           rc=0
-          run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$review_prompt_file" || rc=$?
+          run_llm "$REVIEWER2_PROVIDER" "$REVIEWER2_MODEL" "$reviewer2_prompt_wrapped" || rc=$?
           echo "$RETRY_OUTPUT"
           exit $rc
         ) > "$reviewer2_file" 2>&1 || reviewer2_ok=false
+        stop_ack_watcher "$reviewer2_ack_watcher"
       else
         echo "LGTM" > "$reviewer2_file"
       fi
@@ -1390,12 +1483,18 @@ FIXEOF
 
     log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
     local fix_rc=0
+    local fix_ack_file="$plan_work_dir/fix_$i.ack"
+    local fix_prompt_wrapped="$plan_work_dir/fix_prompt_wrapped_$i.txt"
+    prepend_ack_prompt "$fix_ack_file" "$fix_prompt_file" "$fix_prompt_wrapped"
+    local fix_ack_watcher
+    fix_ack_watcher=$(spawn_ack_watcher "fix-agent" "$fix_ack_file")
     if [ "$(normalize_provider "$FIX_PROVIDER")" = "claude" ] && [ -n "$coder_session_id" ]; then
       log "Resuming Claude coder session for fixes: $coder_session_id"
-      run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" "$coder_session_id" "resume" || fix_rc=$?
+      run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_wrapped" "$coder_session_id" "resume" || fix_rc=$?
     else
-      run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_file" || fix_rc=$?
+      run_llm "$FIX_PROVIDER" "$FIX_MODEL" "$fix_prompt_wrapped" || fix_rc=$?
     fi
+    stop_ack_watcher "$fix_ack_watcher"
     echo "$RETRY_OUTPUT" | tee -a "$LOG_FILE" > "$plan_work_dir/fixes_$i.log"
     if [ "$fix_rc" -ne 0 ]; then
       # Same as the reviewer abort: surface the last non-empty output line so
