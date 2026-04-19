@@ -589,7 +589,10 @@ acquire_lock() {
 
 is_rate_limited() {
   local output="$1"
-  echo "$output" | grep -qiE "rate.?limit|too many requests|429|overloaded|capacity|quota exceeded|try again"
+  # NOTE: bare "429", "try again", and "capacity" are too lossy — they match
+  # ordinary code-review output (e.g. file references like "models.py:429:").
+  # Require HTTP-status context for 429 and rely on the more distinctive phrases.
+  echo "$output" | grep -qiE "rate.?limit|too many requests|quota exceeded|overloaded|(HTTP|status|code|error)[/: ]+429\b"
 }
 
 rate_limit_excerpt() {
@@ -599,7 +602,7 @@ import re
 import sys
 
 text = sys.argv[1]
-pattern = re.compile(r"rate.?limit|too many requests|429|overloaded|capacity|quota exceeded|try again", re.I)
+pattern = re.compile(r"rate.?limit|too many requests|quota exceeded|overloaded|(HTTP|status|code|error)[/: ]+429\b", re.I)
 for line in text.splitlines():
     if pattern.search(line):
         print(line[:500])
