@@ -244,6 +244,44 @@ stop_ack_watcher() {
   return 0
 }
 
+# Extract just the final-answer block from a reviewer capture.
+#
+# Codex CLI emits the entire session transcript (tool calls, file reads,
+# greps showing inlined code, intermediate reasoning) followed by a
+# final block delimited by `^codex$` and `^tokens used$`. The verdict
+# is in that final block; everything before it is noise. For a real
+# review the noise can be hundreds of kilobytes — last seen 925KB
+# combined for one iteration, blowing past Claude's prompt window when
+# the fix LLM tried to consume it.
+#
+# This helper:
+#   - locates the LAST `^codex$` line in the file
+#   - captures everything up to (but not including) the next
+#     `^tokens used$` line, or to EOF if none follows
+#   - trims surrounding whitespace
+#
+# When no `^codex$` marker exists (e.g. a non-codex reviewer whose tool
+# just emits the verdict text), it falls back to the trimmed full file
+# so existing reviewers keep working.
+#
+# Both the LGTM-detection gate and the combined-review file passed to
+# the fix LLM call this — same compressed text in both places, so the
+# gate becomes accurate AND the fix prompt stays small.
+extract_reviewer_verdict() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  if grep -q '^codex$' "$file" 2>/dev/null; then
+    awk '
+      /^codex$/        { buf = ""; capturing = 1; next }
+      /^tokens used$/  { capturing = 0; next }
+      capturing        { buf = buf $0 "\n" }
+      END              { printf "%s", buf }
+    ' "$file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  else
+    sed 's/^[[:space:]]*//;s/[[:space:]]*$//' "$file"
+  fi
+}
+
 # Run any deterministic (non-LLM) test commands configured for the target repos.
 #
 # For each repo in TARGET_REPOS, looks up the env var
@@ -1568,10 +1606,16 @@ run_review_loop() {
       break
     fi
 
+    # Strip the codex transcript noise from each reviewer's capture and
+    # keep only the verdict block. See extract_reviewer_verdict for the
+    # full rationale: this fixes the LGTM gate (which was failing strict
+    # equality against ~500KB of transcript) AND keeps the fix LLM's
+    # prompt small enough to fit Claude's context window across multiple
+    # iterations.
     local reviewer1_review=""
     local reviewer2_review=""
-    [ -f "$reviewer1_file" ] && reviewer1_review=$(cat "$reviewer1_file")
-    [ -f "$reviewer2_file" ] && reviewer2_review=$(cat "$reviewer2_file")
+    [ -f "$reviewer1_file" ] && reviewer1_review=$(extract_reviewer_verdict "$reviewer1_file")
+    [ -f "$reviewer2_file" ] && reviewer2_review=$(extract_reviewer_verdict "$reviewer2_file")
 
     local combined_review="## $REVIEWER1_LABEL Review
 
