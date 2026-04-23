@@ -112,13 +112,16 @@ run_case() {
 case_fallback_to_main_when_base_deleted() {
   reset_all_repos_to_base "$GHOST_BRANCH"
 
-  # reset_all_repos_to_base does not return a value — assert via the
-  # observable side effect: the repo should be on main, not on the ghost
-  # branch.
-  local current
-  current=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" branch --show-current)
-  if [ "$current" != "main" ]; then
-    echo "  FAIL: ghost-repo ended up on '$current', expected 'main'" >&2
+  local actual_head expected_head current_branch
+  actual_head=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" rev-parse HEAD)
+  expected_head=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" rev-parse main)
+  current_branch=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" branch --show-current)
+  if [ "$actual_head" != "$expected_head" ]; then
+    echo "  FAIL: ghost-repo HEAD did not land on main after fallback" >&2
+    return 1
+  fi
+  if [ -n "$current_branch" ]; then
+    echo "  FAIL: ghost-repo should be detached after fallback, got branch '$current_branch'" >&2
     return 1
   fi
 
@@ -156,10 +159,16 @@ case_live_base_still_used() {
   : > "$LOG_FILE"
   reset_all_repos_to_base "$LIVE_BRANCH"
 
-  local current
-  current=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" branch --show-current)
-  if [ "$current" != "$LIVE_BRANCH" ]; then
-    echo "  FAIL: expected ghost-repo on '$LIVE_BRANCH', got '$current'" >&2
+  local actual_head expected_head current_branch
+  actual_head=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" rev-parse HEAD)
+  expected_head=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" rev-parse "refs/remotes/origin/$LIVE_BRANCH")
+  current_branch=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" branch --show-current)
+  if [ "$actual_head" != "$expected_head" ]; then
+    echo "  FAIL: expected ghost-repo detached at '$LIVE_BRANCH'" >&2
+    return 1
+  fi
+  if [ -n "$current_branch" ]; then
+    echo "  FAIL: expected detached HEAD for live base, got branch '$current_branch'" >&2
     return 1
   fi
 
@@ -184,10 +193,16 @@ case_empty_base_resets_to_main() {
 
   reset_all_repos_to_base ""
 
-  local current
-  current=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" branch --show-current)
-  if [ "$current" != "main" ]; then
-    echo "  FAIL: empty base should reset to main, got '$current'" >&2
+  local actual_head expected_head current_branch
+  actual_head=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" rev-parse HEAD)
+  expected_head=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" rev-parse main)
+  current_branch=$(git -C "$PROJECT_DIR_OVERRIDE/ghost-repo" branch --show-current)
+  if [ "$actual_head" != "$expected_head" ]; then
+    echo "  FAIL: empty base should detach at main" >&2
+    return 1
+  fi
+  if [ -n "$current_branch" ]; then
+    echo "  FAIL: empty base should leave detached HEAD, got '$current_branch'" >&2
     return 1
   fi
   return 0
