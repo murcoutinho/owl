@@ -135,8 +135,13 @@ Explicit path(s) to the repo(s). For multi-repo plans, list all repos and note t
 
 > Example: `server at /Users/user/path/to/projects/project-api, mobile at /Users/user/path/to/projects/project-web. Both repos must be modified together.`
 
+**Worktree note:** Owl executes plans inside a temporary git worktree, NOT in the original repo directory. The agent is launched with `cd` into the worktree root (e.g., `.work/worktrees/<plan-name>/project-api/`). This means:
+- **Use relative paths or repo-name-based paths for instructions** (e.g., "in `pipeline/foo.py`"), not absolute paths like `/Users/user/path/to/projects/project-api/pipeline/foo.py`.
+- **Absolute paths in the "Working directory" section are for human reference only** — they tell the reader which repos are involved, but the agent will be working in the worktree copy.
+- **Absolute paths in anchors are fine** — Owl reads anchors before creating the worktree to verify they exist, and the agent can still use them for context. But instructions in "What to change" should reference files by relative path since the agent is inside the worktree.
+
 ### 3. Existing files to anchor on
-File paths + approximate line numbers for code the plan depends on or will modify. Include short snippets when context matters. **Read the files before writing these — never guess line numbers.**
+File paths + approximate line numbers for code the plan depends on or will modify. Include short snippets when context matters. **Read the files before writing these — never guess line numbers.** Absolute paths are acceptable here — these are read before execution to verify the plan is grounded in real code.
 
 ### 4. What to change
 Concrete instructions, file by file. Each file gets its own subsection: symbols to add, modify, or remove. Include code snippets for non-trivial additions (especially new signatures or helpers).
