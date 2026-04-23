@@ -14,7 +14,7 @@ Owl orchestrates Claude, Codex, or both so implementation, fixes, and reviews ea
 
 1. Drop a numbered markdown plan into `plan/`.
 2. Run `./src/owl.sh`.
-3. Owl picks the next eligible plan, resets target repos to the right base, executes the plan, commits changes, runs review rounds, applies fixes, pushes branches, and opens PRs.
+3. Owl picks the next eligible plan, creates deterministic per-plan worktrees for the target repos, resets those worktrees to the right base, executes the plan, commits changes, runs review rounds, applies fixes, pushes branches, and opens PRs.
 4. Owl writes a done file with the execution summary.
 
 ## Quick start
@@ -99,6 +99,7 @@ Keep plans self-contained. Reviewers only see the plan text plus diffs.
 - Low-priority queue with `--skip-low-priority`
 - Resume after crash or rate-limit abort
 - Persistent Claude coder/fix session reuse
+- Deterministic per-plan git worktrees under `.work/worktrees/`
 - Done files and per-plan work logs under `.work/`
 
 ## Configuration
@@ -165,7 +166,7 @@ Notes:
 - `--doctor` does not call any LLM or touch git. Run it first on a new machine.
 - `--skip-low-priority` only skips plans with `priority: low`.
 - `--validate` does not call any model or touch git.
-- If a repo already has local changes, Owl aborts before calling the coder.
+- Owl runs plans in deterministic per-plan worktrees, so dirty source repos no longer block execution.
 
 ## Requirements
 
@@ -190,6 +191,7 @@ Owl invokes its provider CLIs with their "unattended" flags — `claude --danger
 The isolation model is deliberately simple:
 
 - **Scope is fenced at the repo layer.** Owl only touches directories listed in `OWL_TARGET_REPOS` that sit next to the `owl/` checkout. Everything outside that set is invisible to the agent.
+- **Execution happens in per-plan worktrees.** Owl reuses deterministic worktrees under `.work/worktrees/<plan>/` so the live sibling repos can stay dirty while a plan runs or waits for review resume.
 - **Humans still gate merges.** Owl opens pull requests — it does not merge them. Branch protection on your target repos is the last line of defense and should stay on.
 - **`OWL_TEST_CMD_<repo>` runs arbitrary shell.** Only set it from trusted `.env.local` config, never from plan content or LLM output.
 - **The plan queue is trusted input.** Anyone who can write to `plan/` can direct the agent. Treat `plan/` the same way you treat your shell history or `~/.ssh/config`.

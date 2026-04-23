@@ -55,6 +55,8 @@ EOF
 PLAN_NAME="099-abort-regression"
 PLAN_WORK_DIR="$WORK_DIR/$PLAN_NAME"
 mkdir -p "$PLAN_WORK_DIR"
+ensure_plan_workspace "$PLAN_NAME" "$PLAN_WORK_DIR"
+WORKTREE_REPO="$WORK_DIR/worktrees/$PLAN_NAME/fake-repo"
 
 # Minimal plan work dir state. run_review_loop reads:
 #   - $plan_work_dir/branch   (branch name; checkout is skipped if branch
@@ -64,8 +66,8 @@ mkdir -p "$PLAN_WORK_DIR"
 echo "owl/$PLAN_NAME" > "$PLAN_WORK_DIR/branch"
 # Write the actual HEAD SHA into the manifest so the resume-phase drift
 # check (added upstream) sees a matching head and does not bail out.
-FAKE_REPO_HEAD="$(git -C "$FAKE_PROJECT_DIR/fake-repo" rev-parse HEAD)"
-printf 'fake-repo\t%s\tNONE\t%s\n' "$FAKE_PROJECT_DIR/fake-repo" "$FAKE_REPO_HEAD" > "$PLAN_WORK_DIR/review_input_1.tsv"
+FAKE_REPO_HEAD="$(git -C "$WORKTREE_REPO" rev-parse HEAD)"
+printf 'fake-repo\t%s\tNONE\t%s\n' "$WORKTREE_REPO" "$FAKE_REPO_HEAD" > "$PLAN_WORK_DIR/review_input_1.tsv"
 
 # ---- Stubs ---------------------------------------------------------------
 
