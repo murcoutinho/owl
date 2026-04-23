@@ -21,6 +21,7 @@ PLAN_DIR="$SCRIPT_DIR/../plan"
 LOG_FILE="$SCRIPT_DIR/../agent.log"
 WORK_DIR="$SCRIPT_DIR/../.work"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+EXECUTION_PROJECT_DIR="$PROJECT_DIR"
 LOCK_FILE="$SCRIPT_DIR/../.agent.lock"
 
 # Optional local machine-specific config. Keep instance details like
@@ -140,14 +141,37 @@ if [ -z "$TARGET_REPOS" ] && [ -z "$VALIDATE_PLAN_FILE" ] && [ "$DOCTOR_MODE" !=
   exit 2
 fi
 
-# List .git dirs for target repos only (null-delimited, compatible with existing loops)
-find_target_repos() {
+# List repo roots for target repos only (null-delimited).
+find_repos_in_project_dir() {
+  local project_dir="$1"
   for repo_name in $TARGET_REPOS; do
-    local git_dir="$PROJECT_DIR/$repo_name/.git"
-    if [ -d "$git_dir" ]; then
-      printf '%s\0' "$git_dir"
+    local repo_root="$project_dir/$repo_name"
+    if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      printf '%s\0' "$repo_root"
     fi
   done
+}
+
+find_source_target_repos() {
+  find_repos_in_project_dir "$PROJECT_DIR"
+}
+
+find_target_repos() {
+  find_repos_in_project_dir "$EXECUTION_PROJECT_DIR"
+}
+
+plan_workspace_root() {
+  local plan_name="$1"
+  printf '%s\n' "$WORK_DIR/worktrees/$plan_name"
+}
+
+activate_execution_project_dir() {
+  local project_dir="$1"
+  EXECUTION_PROJECT_DIR="$project_dir"
+}
+
+reset_execution_project_dir() {
+  EXECUTION_PROJECT_DIR="$PROJECT_DIR"
 }
 
 log() {
@@ -304,9 +328,8 @@ run_deterministic_tests() {
   local any_configured=false
   local any_failed=false
 
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root repo_name var_name cmd
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
+    local repo_name var_name cmd
     repo_name="$(basename "$repo_root")"
     var_name="OWL_TEST_CMD_${repo_name//-/_}"
     cmd="${!var_name:-}"
@@ -394,6 +417,80 @@ repo_has_local_changes() {
     return 0
   fi
   return 1
+}
+
+ensure_repo_worktree() {
+  local source_repo_root="$1"
+  local repo_name="$2"
+  local worktree_root="$3"
+
+  if [ -e "$worktree_root" ]; then
+    if git -C "$worktree_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      return 0
+    fi
+    log "  $repo_name: ERROR — worktree path exists but is not a git worktree: $worktree_root"
+    return 1
+  fi
+
+  if ! git -C "$source_repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+    log "  $repo_name: SKIPPING — source repo has no commits, cannot create worktree"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$worktree_root")"
+  git -C "$source_repo_root" worktree prune >/dev/null 2>>"$LOG_FILE" || true
+
+  local add_output=""
+  add_output=$(git -C "$source_repo_root" worktree add --detach "$worktree_root" HEAD 2>&1) || {
+    log "  $repo_name: ERROR — failed to create worktree at $worktree_root"
+    log "  $add_output"
+    return 1
+  }
+  return 0
+}
+
+ensure_plan_workspace() {
+  local plan_name="$1"
+  local plan_work_dir="$2"
+  local workspace_root
+  workspace_root="$(plan_workspace_root "$plan_name")"
+
+  mkdir -p "$workspace_root"
+  while IFS= read -r -d '' repo_root; do
+    local repo_name
+    repo_name="$(basename "$repo_root")"
+    ensure_repo_worktree "$repo_root" "$repo_name" "$workspace_root/$repo_name" || return 1
+  done < <(find_source_target_repos)
+
+  printf '%s\n' "$workspace_root" > "$plan_work_dir/execution_project_dir"
+  activate_execution_project_dir "$workspace_root"
+  return 0
+}
+
+cleanup_plan_workspace() {
+  local plan_name="$1"
+  local plan_work_dir="${2:-}"
+  local workspace_root
+  workspace_root="$(plan_workspace_root "$plan_name")"
+
+  while IFS= read -r -d '' repo_root; do
+    local repo_name worktree_root
+    repo_name="$(basename "$repo_root")"
+    worktree_root="$workspace_root/$repo_name"
+    if [ -e "$worktree_root" ]; then
+      git -C "$repo_root" worktree remove --force "$worktree_root" >/dev/null 2>>"$LOG_FILE" || \
+        log "  $repo_name: WARNING — failed to remove worktree $worktree_root"
+    fi
+    git -C "$repo_root" worktree prune >/dev/null 2>>"$LOG_FILE" || true
+  done < <(find_source_target_repos)
+
+  rm -rf "$workspace_root"
+  if [ -n "$plan_work_dir" ]; then
+    rm -f "$plan_work_dir/execution_project_dir"
+  fi
+  if [ "$EXECUTION_PROJECT_DIR" = "$workspace_root" ]; then
+    reset_execution_project_dir
+  fi
 }
 
 ensure_plan_branch_checked_out() {
@@ -528,9 +625,8 @@ normalize_all_plan_repos() {
   local branch_mode="${5:-reuse}"
 
   local had_error=false
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root repo_name base_hash recorded_base
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
+    local repo_name base_hash recorded_base
     repo_name="$(basename "$repo_root")"
 
     if [ "$branch_mode" = "reuse" ] && \
@@ -904,15 +1000,15 @@ retry_on_limit() {
 #     already merged and its branch deleted)
 reset_all_repos_to_base() {
   local base_branch="$1"
+  local discard_owned_changes="${2:-0}"
   if [ -z "$base_branch" ]; then
-    log "Resetting all repos to main and pulling..."
+    log "Resetting all execution repos to main..."
   else
-    log "Resetting all repos to base branch '$base_branch' (fallback: main) and pulling..."
+    log "Resetting all execution repos to base branch '$base_branch' (fallback: main)..."
   fi
 
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root repo_name
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
+    local repo_name
     repo_name="$(basename "$repo_root")"
 
     # Skip repos with no commits
@@ -920,12 +1016,21 @@ reset_all_repos_to_base() {
       continue
     fi
 
-    # Skip repos with any local changes — tracked, staged, or untracked (protect user's work)
-    if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
-       ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-      log "  $repo_name: SKIPPING — has local changes"
-      continue
+    if repo_has_local_changes "$repo_root"; then
+      if [ "$discard_owned_changes" = "1" ]; then
+        log "  $repo_name: discarding stale Owl-managed worktree changes before reset"
+        git -C "$repo_root" reset --hard HEAD >/dev/null 2>>"$LOG_FILE" || {
+          log "  $repo_name: WARNING — failed to reset worktree"
+          continue
+        }
+        git -C "$repo_root" clean -fd >/dev/null 2>>"$LOG_FILE" || {
+          log "  $repo_name: WARNING — failed to clean worktree"
+          continue
+        }
+      else
+        log "  $repo_name: SKIPPING — has local changes"
+        continue
+      fi
     fi
 
     # Decide which branch this repo should land on. Start from the requested
@@ -939,10 +1044,12 @@ reset_all_repos_to_base() {
     # ref trap would make the dependent plan run on yesterday's base instead
     # of today's main.
     local target_branch="main"
+    local target_ref="main"
     if [ -n "$base_branch" ]; then
       if git -C "$repo_root" fetch origin "$base_branch" 2>/dev/null && \
          git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
         target_branch="$base_branch"
+        target_ref="refs/remotes/origin/$base_branch"
         log "  $repo_name: using base branch '$base_branch' from origin"
       else
         log "  $repo_name: base branch '$base_branch' not on origin — falling back to main"
@@ -950,30 +1057,16 @@ reset_all_repos_to_base() {
         # this repo does not accidentally resurrect it.
         git -C "$repo_root" update-ref -d "refs/remotes/origin/$base_branch" 2>/dev/null || true
       fi
+    elif git -C "$repo_root" fetch origin main 2>/dev/null && \
+         git -C "$repo_root" rev-parse --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
+      target_ref="refs/remotes/origin/main"
     fi
 
-    local current_branch
-    current_branch=$(git -C "$repo_root" branch --show-current 2>>"$LOG_FILE")
-
-    if [ "$current_branch" != "$target_branch" ]; then
-      log "  $repo_name: switching from '$current_branch' to '$target_branch'"
-      # For a remote-only branch, create a local tracking branch on checkout.
-      if git -C "$repo_root" rev-parse --verify "$target_branch" >/dev/null 2>&1; then
-        git -C "$repo_root" checkout "$target_branch" 2>>"$LOG_FILE" || {
-          log "  $repo_name: WARNING — failed to checkout '$target_branch'"
-          continue
-        }
-      else
-        git -C "$repo_root" checkout -b "$target_branch" --track "origin/$target_branch" 2>>"$LOG_FILE" || {
-          log "  $repo_name: WARNING — failed to check out tracking branch for '$target_branch'"
-          continue
-        }
-      fi
-    fi
-
-    # Pull latest (non-destructive, fast-forward only)
-    git -C "$repo_root" pull --ff-only origin "$target_branch" 2>>"$LOG_FILE" || \
-      log "  $repo_name: pull --ff-only failed (may need manual merge)"
+    log "  $repo_name: detaching worktree at '$target_branch'"
+    git -C "$repo_root" checkout --detach "$target_ref" >/dev/null 2>>"$LOG_FILE" || {
+      log "  $repo_name: WARNING — failed to detach worktree at '$target_ref'"
+      continue
+    }
 
   done < <(find_target_repos)
 }
@@ -1000,9 +1093,8 @@ push_and_open_prs() {
 
   local had_pr_failure=false
 
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root repo_name
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
+    local repo_name
     repo_name="$(basename "$repo_root")"
 
     # Skip repos that don't have this branch
@@ -1080,11 +1172,10 @@ EOF
 
 # ─── Step 8: Switch all repos back to main ───
 switch_all_to_main() {
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      git -C "$repo_root" checkout main 2>>"$LOG_FILE" || log "  $(basename "$repo_root"): WARNING — failed to checkout main"
+      git -C "$repo_root" checkout --detach main >/dev/null 2>>"$LOG_FILE" || \
+        log "  $(basename "$repo_root"): WARNING — failed to detach at main"
     fi
   done < <(find_target_repos)
 }
@@ -1094,6 +1185,7 @@ execute_plan() {
   local plan_file="$1"
   local plan_name
   plan_name="$(basename "$plan_file")"
+  local plan_slug="${plan_name%.md}"
 
   log "========================================="
   log "Found plan: $plan_name"
@@ -1113,7 +1205,7 @@ execute_plan() {
   fi
 
   local work_id
-  work_id="$(date '+%Y%m%d_%H%M%S')_${plan_name%.md}"
+  work_id="$(date '+%Y%m%d_%H%M%S')_${plan_slug}"
   local plan_work_dir="$WORK_DIR/$work_id"
   mkdir -p "$plan_work_dir"
   echo "$plan_review_iterations" > "$plan_work_dir/review_iterations"
@@ -1123,29 +1215,28 @@ execute_plan() {
     echo "$plan_base_branch" > "$plan_work_dir/base_branch"
   fi
 
-  local branch_name="owl/${plan_name%.md}"
+  local branch_name="owl/$plan_slug"
   local execution_base_file="$plan_work_dir/execution_base.tsv"
   : > "$execution_base_file"
 
   # Create a session ID for the Claude coder so the fix phase can --resume
   # into the same conversation and reuse file-read context. Sessions are
   # directory-scoped, so both the execution and fix calls must run from
-  # the same cwd (PROJECT_DIR).
+  # the same cwd (the per-plan execution workspace).
   local coder_session_id=""
   if [ "$(normalize_provider "$IMPL_PROVIDER")" = "claude" ]; then
     coder_session_id="$(get_or_create_coder_session_id "$plan_work_dir")"
     log "Using Claude coder session: $coder_session_id"
   fi
 
-  # ── Step 2: Reset to base branch (or main) & pull ──
-  reset_all_repos_to_base "$plan_base_branch"
+  # ── Step 2: Create/reuse deterministic worktrees, then reset them to the base ──
+  if ! ensure_plan_workspace "$plan_slug" "$plan_work_dir"; then
+    log "Plan execution aborted before $IMPL_PROVIDER: failed to prepare worktrees."
+    return 1
+  fi
+  reset_all_repos_to_base "$plan_base_branch" "1"
 
-  # ── Snapshot which repos are already dirty (not ours to clean) ──
-  local pre_dirty_file="$plan_work_dir/pre_dirty_repos.txt"
-  : > "$pre_dirty_file"
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
     local repo_name
     repo_name="$(basename "$repo_root")"
     local base_hash="NONE"
@@ -1153,26 +1244,11 @@ execute_plan() {
       base_hash=$(git -C "$repo_root" rev-parse HEAD)
     fi
     printf '%s\t%s\t%s\n' "$repo_name" "$repo_root" "$base_hash" >> "$execution_base_file"
-    if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
-       ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
-      echo "$repo_root" >> "$pre_dirty_file"
-    fi
   done < <(find_target_repos)
-
-  if [ -s "$pre_dirty_file" ]; then
-    log "Plan execution aborted before $IMPL_PROVIDER: repos have pre-existing local changes."
-    while IFS= read -r repo_root; do
-      [ -n "$repo_root" ] || continue
-      log "  dirty repo: $(basename "$repo_root") ($repo_root)"
-    done < "$pre_dirty_file"
-    log "Clean or commit those repos first, then retry the plan."
-    return 1
-  fi
 
   # ── Step 3: Execute plan ──
   log "[Step 3] Executing plan via $IMPL_PROVIDER ($IMPL_MODEL)..."
-  cd "$PROJECT_DIR"
+  cd "$EXECUTION_PROJECT_DIR"
 
   local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
   cat > "$plan_prompt_file" <<PLANEOF
@@ -1198,15 +1274,9 @@ PLANEOF
 
   if [ $exit_code -ne 0 ] || [ -z "$exec_output" ] || echo "$exec_output" | grep -qi "^Execution error$"; then
     log "Plan execution failed (exit=$exit_code, output_len=${#exec_output}). Will retry next cycle."
-    # Discard partial changes only in repos dirtied by THIS run (not pre-existing dirty repos)
-    while IFS= read -r -d '' repo_dir; do
-      local repo_root repo_name
-      repo_root="$(dirname "$repo_dir")"
+    while IFS= read -r -d '' repo_root; do
+      local repo_name
       repo_name="$(basename "$repo_root")"
-      # Skip repos that were already dirty before execution
-      if grep -qxF "$repo_root" "$pre_dirty_file" 2>/dev/null; then
-        continue
-      fi
       if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
          ! git -C "$repo_root" diff --cached --quiet 2>/dev/null || \
          [ -n "$(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null)" ]; then
@@ -1241,9 +1311,7 @@ PLANEOF
     # dirty worktree — if so, the commit path above logged an ERROR and we
     # should retry, not mark done.
     local has_uncommitted_changes=false
-    while IFS= read -r -d '' repo_dir; do
-      local repo_root
-      repo_root="$(dirname "$repo_dir")"
+    while IFS= read -r -d '' repo_root; do
       if ! git -C "$repo_root" diff --quiet 2>/dev/null || \
          ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
         has_uncommitted_changes=true
@@ -1260,6 +1328,7 @@ PLANEOF
     log "Plan produced no changes in any repo. Marking done with no-op summary."
     log "[Step 5] Switching all repos back to main..."
     switch_all_to_main
+    cleanup_plan_workspace "$plan_slug" "$plan_work_dir"
     write_done_file "$plan_file" "$plan_name" "$plan_work_dir" 0 0 \
       "No repo changes were needed. The requested work appears to already be present on main."
     return 0
@@ -1341,6 +1410,13 @@ run_review_loop() {
   local plan_file="$1"
   local plan_name="$2"
   local plan_work_dir="$3"
+  local plan_slug="${plan_name%.md}"
+
+  if ! ensure_plan_workspace "$plan_slug" "$plan_work_dir"; then
+    log "Review loop aborted: failed to prepare worktrees for $plan_name"
+    return 1
+  fi
+  cd "$EXECUTION_PROJECT_DIR"
 
   # Load the coder session ID so the fix phase can --resume into the
   # execution conversation. Empty string if the execution didn't use Claude
@@ -1374,9 +1450,7 @@ run_review_loop() {
 
   # Ensure we're on the right branch
   if [ -n "$branch_name" ]; then
-    while IFS= read -r -d '' repo_dir; do
-      local repo_root
-      repo_root="$(dirname "$repo_dir")"
+    while IFS= read -r -d '' repo_root; do
       if git -C "$repo_root" rev-parse --verify "$branch_name" >/dev/null 2>&1; then
         git -C "$repo_root" checkout "$branch_name" 2>/dev/null
       fi
@@ -1402,7 +1476,7 @@ run_review_loop() {
     local drift_detected=false
     while IFS=$'\t' read -r repo_name repo_root base_hash expected_head; do
       [ -n "$repo_root" ] || continue
-      if [ ! -d "$repo_root/.git" ]; then
+      if ! git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         log "[Resume] $repo_name: repo directory missing at $repo_root"
         drift_detected=true
         continue
@@ -1755,8 +1829,8 @@ FIXEOF
       echo "aborted_at=$(date '+%Y-%m-%d %H:%M:%S')"
     } > "$plan_work_dir/pending_status"
 
-    # Switch back to main so the operator's working tree isn't stuck on the
-    # plan's branch while the next cycle waits.
+    # Detach execution worktrees away from the plan branch so the next cycle
+    # resumes from a neutral checkout.
     switch_all_to_main
     return 1
   fi
@@ -1785,6 +1859,7 @@ FIXEOF
   # ── Step 8: Switch back to main ──
   log "[Step 8] Switching all repos back to main..."
   switch_all_to_main
+  cleanup_plan_workspace "$plan_slug" "$plan_work_dir"
 
   # ── Step 9: Write done file ──
   log "========================================="
@@ -1806,6 +1881,7 @@ resume_pending_reviews() {
 
     if [ ! -f "$plan_file" ]; then
       log "Pending review for '$plan_name' but plan file is gone. Cleaning up."
+      cleanup_plan_workspace "${plan_name%.md}" "$plan_work_dir"
       rm -f "$pending_file"
       continue
     fi
@@ -1941,9 +2017,8 @@ validate_plan() {
   # 4. Enumerate target repos and (5) check base-branch availability
   echo "Target repos:"
   local found_repos=0
-  while IFS= read -r -d '' repo_dir; do
-    local repo_root repo_name
-    repo_root="$(dirname "$repo_dir")"
+  while IFS= read -r -d '' repo_root; do
+    local repo_name
     repo_name="$(basename "$repo_root")"
     echo "  - $repo_name ($repo_root)"
     found_repos=$((found_repos + 1))
@@ -1956,7 +2031,7 @@ validate_plan() {
         echo "      would fall back to main (base '$base_branch' not cached locally)"
       fi
     fi
-  done < <(find_target_repos)
+  done < <(find_source_target_repos)
 
   if [ "$found_repos" -eq 0 ]; then
     echo "  (none found -- check OWL_TARGET_REPOS)"
@@ -2045,7 +2120,7 @@ run_doctor() {
     local repo_name repo_path
     for repo_name in $TARGET_REPOS; do
       repo_path="$PROJECT_DIR/$repo_name"
-      if [ -d "$repo_path/.git" ]; then
+      if git -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         echo "    ok  $repo_name -> $repo_path"
       else
         echo "    FAIL $repo_name: $repo_path is not a git repo"

@@ -67,6 +67,7 @@ source_owl() {
   # necessary so find_target_repos enumerates the fake repos.
   if [ -n "${FAKE_PROJECT_DIR:-}" ]; then
     PROJECT_DIR="$FAKE_PROJECT_DIR"
+    EXECUTION_PROJECT_DIR="$FAKE_PROJECT_DIR"
   fi
   if [ -n "$fake_target_repos" ]; then
     TARGET_REPOS="$fake_target_repos"
