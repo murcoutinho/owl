@@ -209,9 +209,17 @@ prepend_ack_prompt() {
   # $1: absolute path the agent should write to as its first tool call
   # $2: base prompt file (existing content, unchanged on disk)
   # $3: output path for the wrapped prompt
+  # $4: (optional) worktree root — when non-empty, a WORKTREE CONTRACT block
+  #     is injected between the ack directive and the base prompt, listing
+  #     the worktree path, its sub-repos (derived from $TARGET_REPOS), and
+  #     the prefix-translation rule for absolute paths that appear in the
+  #     base prompt. This stops the coder/reviewer/fix agent from editing
+  #     the source project copy when the plan mentions absolute paths under
+  #     $PROJECT_DIR. Safe to pass an empty string to disable.
   local ack_path="$1"
   local base_prompt="$2"
   local out="$3"
+  local worktree_root="${4:-}"
   rm -f "$ack_path" 2>/dev/null || true
   {
     echo "PROOF-OF-LIFE REQUIREMENT"
@@ -224,6 +232,38 @@ prepend_ack_prompt() {
     echo ""
     echo "---"
     echo ""
+    if [ -n "$worktree_root" ] && [ "$worktree_root" != "$PROJECT_DIR" ]; then
+      echo "WORKTREE CONTRACT"
+      echo ""
+      echo "You are working in an isolated git worktree:"
+      echo "  $worktree_root"
+      echo ""
+      echo "Sub-repos inside this worktree:"
+      for repo_name in $TARGET_REPOS; do
+        if [ -e "$worktree_root/$repo_name" ]; then
+          echo "  $worktree_root/$repo_name"
+        fi
+      done
+      echo ""
+      echo "The plan below may reference files by absolute path under the"
+      echo "source project directory:"
+      echo "  $PROJECT_DIR"
+      echo ""
+      echo "Those absolute paths are IDENTIFIERS, not edit targets. Before"
+      echo "calling Edit/Write/MultiEdit or any Bash command that writes"
+      echo "files, translate every such path by replacing the prefix"
+      echo "  $PROJECT_DIR/<repo>/"
+      echo "with"
+      echo "  $worktree_root/<repo>/"
+      echo ""
+      echo "DO NOT create, modify, or delete any file outside $worktree_root."
+      echo "Reading files outside the worktree for reference is fine; writing"
+      echo "is not. If you ever find yourself about to edit a path that starts"
+      echo "with $PROJECT_DIR/, stop and translate the prefix first."
+      echo ""
+      echo "---"
+      echo ""
+    fi
     cat "$base_prompt"
   } > "$out"
 }
@@ -484,6 +524,12 @@ cleanup_plan_workspace() {
     git -C "$repo_root" worktree prune >/dev/null 2>>"$LOG_FILE" || true
   done < <(find_source_target_repos)
 
+  # Move the shell out of $workspace_root before deleting it — otherwise the
+  # shell's pwd becomes a deleted path, every subsequent `python3` / `pyenv`
+  # invocation hits `shell-init: error retrieving current directory: getcwd`,
+  # and silent failures (e.g. empty coder session IDs) cascade into the next
+  # plan. Fall back through $PROJECT_DIR → / so we always end up somewhere.
+  cd "$WORK_DIR" 2>/dev/null || cd "$PROJECT_DIR" 2>/dev/null || cd / || true
   rm -rf "$workspace_root"
   if [ -n "$plan_work_dir" ]; then
     rm -f "$plan_work_dir/execution_project_dir"
@@ -1261,7 +1307,7 @@ PLANEOF
 
   local coder_ack_file="$plan_work_dir/coder.ack"
   local coder_prompt_wrapped="$plan_work_dir/plan_prompt_wrapped.txt"
-  prepend_ack_prompt "$coder_ack_file" "$plan_prompt_file" "$coder_prompt_wrapped"
+  prepend_ack_prompt "$coder_ack_file" "$plan_prompt_file" "$coder_prompt_wrapped" "$EXECUTION_PROJECT_DIR"
   local coder_ack_watcher
   coder_ack_watcher=$(spawn_ack_watcher "coder" "$coder_ack_file")
 
@@ -1580,10 +1626,10 @@ run_review_loop() {
     local reviewer1_ack_watcher=""
     local reviewer2_ack_watcher=""
     if $reviewer1_enabled; then
-      prepend_ack_prompt "$reviewer1_ack_file" "$review_prompt_file" "$reviewer1_prompt_wrapped"
+      prepend_ack_prompt "$reviewer1_ack_file" "$review_prompt_file" "$reviewer1_prompt_wrapped" "$EXECUTION_PROJECT_DIR"
     fi
     if $reviewer2_enabled; then
-      prepend_ack_prompt "$reviewer2_ack_file" "$review_prompt_file" "$reviewer2_prompt_wrapped"
+      prepend_ack_prompt "$reviewer2_ack_file" "$review_prompt_file" "$reviewer2_prompt_wrapped" "$EXECUTION_PROJECT_DIR"
     fi
 
     if [ "$REVIEW_MODE" = "parallel" ]; then
@@ -1760,7 +1806,7 @@ FIXEOF
     local fix_rc=0
     local fix_ack_file="$plan_work_dir/fix_$i.ack"
     local fix_prompt_wrapped="$plan_work_dir/fix_prompt_wrapped_$i.txt"
-    prepend_ack_prompt "$fix_ack_file" "$fix_prompt_file" "$fix_prompt_wrapped"
+    prepend_ack_prompt "$fix_ack_file" "$fix_prompt_file" "$fix_prompt_wrapped" "$EXECUTION_PROJECT_DIR"
     local fix_ack_watcher
     fix_ack_watcher=$(spawn_ack_watcher "fix-agent" "$fix_ack_file")
     if [ "$(normalize_provider "$FIX_PROVIDER")" = "claude" ] && [ -n "$coder_session_id" ]; then
