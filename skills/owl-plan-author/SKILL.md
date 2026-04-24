@@ -152,6 +152,8 @@ Owl executes plans inside a temporary git worktree, NOT in the original repo dir
 
 A plan that violates this rule is the most common cause of the "Plan produced no changes in any repo" failure — Claude will follow the absolute path verbatim, edit the source repo, and Owl's worktree inspection will find nothing to commit.
 
+Owl ships a standalone linter (`src/lint_plan.sh`) for this rule. Run it on your draft **before** dropping the plan into `owl/plan/` — it is a pre-queue author tool, never invoked by Owl at runtime. See Step 6b for the command and exit semantics.
+
 ### 3. Existing files to anchor on
 File paths + approximate line numbers for code the plan depends on or will modify. Include short snippets when context matters. **Read the files before writing these — never guess line numbers.** Absolute paths are acceptable here — these are read before execution to verify the plan is grounded in real code.
 
@@ -203,6 +205,38 @@ Re-read the draft. Ask: "Could a fresh agent with no conversation history execut
 - Anchors in Section 3 cite source files with line numbers (absolute paths OK here — they are read-only grounding).
 - Edit instructions in Sections 4 and 6 use repo-relative paths, never absolute. See Step 2's edit-target path rule.
 - Every referenced function/file was verified to exist (grep/read confirmed).
+
+---
+
+## Step 6b — Lint the draft before queueing
+
+Owl ships a **standalone pre-queue linter** — a small bash script that enforces the Step 2 / Step 6 edit-target path rule. It is deliberately separate from Owl's runtime (`src/owl.sh`); Owl never invokes the linter during plan execution. Authors invoke it explicitly before moving a plan into `owl/plan/`.
+
+```sh
+cd /path/to/owl && ./src/lint_plan.sh path/to/your-draft-plan.md
+```
+
+Output:
+- Exit 0 + `lint_plan: <path> — OK (0 edit-target path violations)` — plan passes.
+- Exit 1 + a list of offending lines with column-aligned snippets — plan has violations; fix and re-run.
+
+What the linter scans:
+- Only Sections titled **"What to change"** and **"Files to modify"**.
+- Ignores YAML frontmatter and fenced code blocks — snippet contents are never flagged.
+
+What counts as a violation in those two sections:
+- Any absolute filesystem path (anything starting with `/`).
+- The placeholder `<project-root>/` — it's a documentation marker, not a valid edit target.
+
+What counts as **OK**:
+- Repo-relative paths like `pipeline/foo.py` or `<repo-name>/pipeline/foo.py`.
+- Absolute paths in Section 3 anchors or any other section (those are read-only grounding and are intentionally exempt).
+
+What the linter does NOT do:
+- **It is not run by Owl during plan execution.** A malformed plan that skips the lint will still be executed; the runtime WORKTREE CONTRACT directive shipped in Owl and this lint are two independent defenses. The lint is the cheap, fast, local author check; the runtime directive is the agent-facing safeguard. Both exist for a reason.
+- It does not call any LLM, does not touch git, and does not require the plan to be in `owl/plan/` yet.
+
+Pass the linter. Then — and only then — move the file into `owl/plan/` per Step 8.
 
 ---
 
