@@ -205,4 +205,19 @@ Re-read the draft. Ask: "Could a fresh agent with no conversation history execut
 
 - Drop the file into `owl/plan/` only.
 - **Never** rename or renumber a plan already in `plan/` or `plan/done/`. If a number is wrong, leave it and pick the next free one for any fix.
-- Committing the plan file to the owl repo is good hygiene but not required for Owl to execute it — Owl reads the filesystem, not git history.
+
+### DO NOT commit plan files to the Owl repo
+
+**Leave Owl's git tree alone.** The Owl repo's `.gitignore` ignores `plan/*.md` and `plan/done/` on purpose — plans are operator-local, ephemeral queue entries, not source material for the public Owl tool.
+
+After writing a new plan file:
+
+- **Do NOT run** `git add plan/NNN-*.md` in the `owl/` repo.
+- **Do NOT run** `git add -f plan/NNN-*.md` to bypass the ignore rule. This is the exact mistake that has happened before — agents notice the file is ignored, assume that's a bug, and force-add past it.
+- **Do NOT commit** anything in the `owl/` working tree as part of plan authoring. Your one and only deliverable is the file on disk at `owl/plan/NNN-<slug>.md`; Owl picks it up from the filesystem on its next cycle.
+
+Why: Owl's queue lifecycle deletes each plan file from disk (`rm -f`) once it finishes executing — the completed copy lives at `plan/done/<name>_<timestamp>.done.md`. If a plan was force-tracked past the ignore rule, this later `rm` shows up as a permanent "deleted" entry in the operator's `git status` and pollutes every future commit. Don't create that debt.
+
+If the user **explicitly** asks you to publish a specific plan to the Owl repo (e.g. "commit plan 092 as an example"), that's a one-off decision the user is making knowingly — do what they asked. But the default, and what this skill instructs, is: never touch git in the Owl repo.
+
+Owl itself performs no `git` operations against its own repo. Its only `git` invocations are inside the target projects it executes plans against (project-api, project-web, etc.), scoped via `git -C "$repo_root"`.
