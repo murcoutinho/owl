@@ -133,12 +133,24 @@ Why this change is being made. What problem does it solve? What prompted it? Int
 ### 2. Working directory
 Explicit path(s) to the repo(s). For multi-repo plans, list all repos and note they must be modified together.
 
-> Example: `server at /Users/user/path/to/projects/project-api, mobile at /Users/user/path/to/projects/project-web. Both repos must be modified together.`
+> Example: `server at <project-root>/project-api, mobile at <project-root>/project-web. Both repos must be modified together.`
 
-**Worktree note:** Owl executes plans inside a temporary git worktree, NOT in the original repo directory. The agent is launched with `cd` into the worktree root (e.g., `.work/worktrees/<plan-name>/project-api/`). This means:
-- **Use relative paths or repo-name-based paths for instructions** (e.g., "in `pipeline/foo.py`"), not absolute paths like `/Users/user/path/to/projects/project-api/pipeline/foo.py`.
-- **Absolute paths in the "Working directory" section are for human reference only** — they tell the reader which repos are involved, but the agent will be working in the worktree copy.
-- **Absolute paths in anchors are fine** — Owl reads anchors before creating the worktree to verify they exist, and the agent can still use them for context. But instructions in "What to change" should reference files by relative path since the agent is inside the worktree.
+Use `<project-root>` as a placeholder for the operator's project directory — never hardcode a home path like `/Users/.../` or `/home/.../` in the skill. The skill ships in the public Owl repo; examples should work for any operator, not just the author.
+
+#### Edit-target path rule (LOAD-BEARING)
+
+Owl executes plans inside a temporary git worktree, NOT in the original repo directory. The coder agent receives a runtime-interpolated WORKTREE CONTRACT block before your plan, telling it the worktree location and a prefix-translation rule. Your plan must cooperate with that contract:
+
+- **Edit instructions in Sections 4 ("What to change") and 6 ("Files to modify") MUST reference files by repo-relative path**, either `<path-from-repo-root>` (when the plan is single-repo) or `<repo-name>/<path-from-repo-root>` (when the plan spans repos). Never embed an absolute path under the operator's project directory.
+- **Anchors in Section 3 MAY use absolute paths**, because they are read-only grounding — Owl reads them before creating the worktree to verify they exist, and the agent treats them as identifiers, not edit targets. This is the only section where absolute paths are appropriate.
+
+**Examples (placeholder-only, never real user paths):**
+
+> Correct (Section 4 / 6): `pipeline/consolidation.py`, `project-api/pipeline/consolidation.py`
+> Correct (Section 3 anchors): `<project-root>/project-api/pipeline/consolidation.py` — or use the same repo-relative form; both work.
+> Wrong (Section 4 / 6): `<project-root>/project-api/pipeline/consolidation.py` ← absolute path in an edit target makes the agent edit the source copy, not the worktree copy, and Owl silently marks the plan "no changes".
+
+A plan that violates this rule is the most common cause of the "Plan produced no changes in any repo" failure — Claude will follow the absolute path verbatim, edit the source repo, and Owl's worktree inspection will find nothing to commit.
 
 ### 3. Existing files to anchor on
 File paths + approximate line numbers for code the plan depends on or will modify. Include short snippets when context matters. **Read the files before writing these — never guess line numbers.** Absolute paths are acceptable here — these are read before execution to verify the plan is grounded in real code.
@@ -188,7 +200,8 @@ Edge cases, migration concerns, things intentionally left out that might surface
 Re-read the draft. Ask: "Could a fresh agent with no conversation history execute this?"
 
 - No references to "as we discussed" or "the thing from earlier" — inline the actual context.
-- Every path is absolute.
+- Anchors in Section 3 cite source files with line numbers (absolute paths OK here — they are read-only grounding).
+- Edit instructions in Sections 4 and 6 use repo-relative paths, never absolute. See Step 2's edit-target path rule.
 - Every referenced function/file was verified to exist (grep/read confirmed).
 
 ---
