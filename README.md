@@ -166,6 +166,7 @@ Notes:
 - `--doctor` does not call any LLM or touch git. Run it first on a new machine.
 - `--skip-low-priority` only skips plans with `priority: low`.
 - `--validate` does not call any model or touch git.
+- Plan authors can additionally run `./src/lint_plan.sh path/to/draft.md` as a standalone pre-queue lint that enforces repo-relative paths in a plan's "What to change" / "Files to modify" sections. The linter is not part of Owl's execution path — it's a local author check, deliberately separate from the runtime.
 - Owl runs plans in deterministic per-plan worktrees, so dirty source repos no longer block execution.
 
 ## Requirements
