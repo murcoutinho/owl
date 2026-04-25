@@ -287,7 +287,7 @@ spawn_ack_watcher() {
   local timeout_secs="${3:-3600}"
   (
     local waited=0
-    while [ $waited -lt $timeout_secs ]; do
+    while [ "$waited" -lt "$timeout_secs" ]; do
       if [ -f "$ack_file" ]; then
         log "  [$label] agent alive — wrote ack file $ack_file"
         exit 0

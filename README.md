@@ -1,7 +1,5 @@
 # Owl
 
-![shellcheck](https://github.com/YOUR_ORG/owl/actions/workflows/shellcheck.yml/badge.svg)
-
 <p align="center">
   <img src="owl.png" width="400" alt="Owl — autonomous dev agent" />
 </p>
@@ -133,7 +131,7 @@ Set env vars before running `src/owl.sh`:
 Put machine-specific config in the ignored `.env.local`:
 
 ```bash
-OWL_TARGET_REPOS="owl project-api project-web"
+OWL_TARGET_REPOS="project-api project-web"
 
 OWL_IMPL_PROVIDER=claude
 OWL_IMPL_MODEL=claude-opus-4-6
@@ -147,8 +145,8 @@ OWL_REVIEWER1_LABEL="ChatGPT GPT-5.4"
 OWL_REVIEWER2_PROVIDER=none
 OWL_REVIEWER2_MODEL=none
 
-OWL_TEST_CMD_project-api="python -m pytest -q --tb=short"
-OWL_TEST_CMD_project-api_mobile="npm test --silent"
+OWL_TEST_CMD_project_api="python -m pytest -q --tb=short"
+OWL_TEST_CMD_project_web="npm test --silent"
 ```
 
 ## Usage

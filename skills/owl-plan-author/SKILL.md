@@ -133,7 +133,7 @@ Why this change is being made. What problem does it solve? What prompted it? Int
 ### 2. Working directory
 Explicit path(s) to the repo(s). For multi-repo plans, list all repos and note they must be modified together.
 
-> Example: `server at <project-root>/project-api, mobile at <project-root>/project-web. Both repos must be modified together.`
+> Example: `API at <project-root>/project-api, web app at <project-root>/project-web. Both repos must be modified together.`
 
 Use `<project-root>` as a placeholder for the operator's project directory — never hardcode a home path like `/Users/.../` or `/home/.../` in the skill. The skill ships in the public Owl repo; examples should work for any operator, not just the author.
 
@@ -267,4 +267,4 @@ Why: Owl's queue lifecycle deletes each plan file from disk (`rm -f`) once it fi
 
 If the user **explicitly** asks you to publish a specific plan to the Owl repo (e.g. "commit plan 092 as an example"), that's a one-off decision the user is making knowingly — do what they asked. But the default, and what this skill instructs, is: never touch git in the Owl repo.
 
-Owl itself performs no `git` operations against its own repo. Its only `git` invocations are inside the target projects it executes plans against (project-api, project-web, etc.), scoped via `git -C "$repo_root"`.
+Owl itself performs no `git` operations against its own repo. Its only `git` invocations are inside the target projects it executes plans against (for example, `project-api`, `project-web`), scoped via `git -C "$repo_root"`.
