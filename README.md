@@ -179,6 +179,15 @@ Notes:
 
 The repo includes a plan-authoring skill at [`skills/owl-plan-author/SKILL.md`](skills/owl-plan-author/SKILL.md). Use it when you want an agent to draft a new Owl plan with the right numbering, frontmatter, and queue hygiene.
 
+To install it for Claude Code, symlink the bundled skill into your user-level skills directory:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/skills/owl-plan-author" ~/.claude/skills/owl-plan-author
+```
+
+Restart Claude Code after installing or updating the skill; skills are loaded at session start.
+
 ## Contributing
 
 Bug reports, test cases, and new provider integrations are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the test suite, shellcheck expectations, and the kind of changes most likely to land.
