@@ -1588,7 +1588,7 @@ run_review_loop() {
     # intent instead of flagging deliberate changes as regressions.
     local review_prompt_file="$plan_work_dir/review_prompt_$i.txt"
     {
-      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Judge the diff against the plan below — if a change looks surprising but matches what the plan explicitly asked for, that is NOT a bug and must not be flagged. Only flag things that are wrong relative to the plan or introduce genuine defects (security, correctness, crashes, obviously broken logic). Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
+      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Judge the diff against the plan below — if a change looks surprising but matches what the plan explicitly asked for, that is NOT a bug and must not be flagged. Only flag things that are wrong relative to the plan or introduce genuine defects (security, correctness, crashes, obviously broken logic). In particular, make sure that this change does not cause regression of other features or functionalities of the solution — check call sites of any modified function, removed/renamed exports, changed signatures or shared types, edited shared styles/components, and any feature that consumes the touched files. Flag a concrete regression risk when you find one. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
       echo ""
       echo "## Plan being implemented"
       echo ""
