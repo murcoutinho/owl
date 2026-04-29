@@ -118,12 +118,55 @@ case_summary_rewritten_per_call() {
   return 0
 }
 
+# --- Case 6: setup runs before the test command and shares its stdout ---
+case_setup_runs_first() {
+  unset OWL_TEST_CMD_repo_a OWL_TEST_CMD_repo_b OWL_TEST_SETUP_repo_a OWL_TEST_SETUP_repo_b 2>/dev/null || true
+  export OWL_TEST_SETUP_repo_a='echo setup-marker'
+  export OWL_TEST_CMD_repo_a='echo cmd-marker'
+  local rc=0
+  run_deterministic_tests "$PLAN_WORK_DIR" "6" || rc=$?
+  assert_eq 0 "$rc" "setup + cmd both pass → rc=0" || return 1
+  assert_grep "setup-marker" "$PLAN_WORK_DIR/tests_repo-a_6.log" "setup output captured" || return 1
+  assert_grep "cmd-marker" "$PLAN_WORK_DIR/tests_repo-a_6.log" "cmd output captured" || return 1
+  return 0
+}
+
+# --- Case 7: setup failure is reported and skips the test command ---
+case_setup_failure_skips_cmd() {
+  unset OWL_TEST_CMD_repo_a OWL_TEST_CMD_repo_b OWL_TEST_SETUP_repo_a OWL_TEST_SETUP_repo_b 2>/dev/null || true
+  export OWL_TEST_SETUP_repo_a='echo setup-broke; exit 7'
+  export OWL_TEST_CMD_repo_a='echo cmd-should-not-run'
+  local rc=0
+  run_deterministic_tests "$PLAN_WORK_DIR" "7" || rc=$?
+  assert_eq 1 "$rc" "setup failure → rc=1" || return 1
+  assert_grep "setup FAILED" "$PLAN_WORK_DIR/tests_7.txt" "summary flags setup failure" || return 1
+  assert_grep "exit=7" "$PLAN_WORK_DIR/tests_7.txt" "summary records setup exit code" || return 1
+  assert_grep "setup-broke" "$PLAN_WORK_DIR/tests_7.txt" "summary captures setup output" || return 1
+  assert_not_grep "cmd-should-not-run" "$PLAN_WORK_DIR/tests_repo-a_7.log" "test cmd is skipped after setup failure" || return 1
+  return 0
+}
+
+# --- Case 8: hyphen→underscore mapping for the setup variable ---
+case_setup_hyphen_to_underscore_mapping() {
+  unset OWL_TEST_CMD_repo_a OWL_TEST_CMD_repo_b OWL_TEST_SETUP_repo_a OWL_TEST_SETUP_repo_b 2>/dev/null || true
+  export OWL_TEST_SETUP_repo_a='exit 13'
+  export OWL_TEST_CMD_repo_a='true'
+  local rc=0
+  run_deterministic_tests "$PLAN_WORK_DIR" "8" || rc=$?
+  assert_eq 1 "$rc" "setup var resolves via underscore name" || return 1
+  assert_grep "exit=13" "$PLAN_WORK_DIR/tests_8.txt" "exact setup exit code propagated" || return 1
+  return 0
+}
+
 echo "test_run_deterministic_tests:"
 run_case "no commands configured → rc=0, empty summary" case_no_commands_configured
 run_case "all pass → rc=0, empty summary" case_all_pass
 run_case "one fails → rc=1, summary scoped to failing repo" case_one_fails
 run_case "hyphen→underscore variable name mapping" case_hyphen_to_underscore_mapping
 run_case "summary file is rewritten on each call" case_summary_rewritten_per_call
+run_case "setup runs before cmd and shares the per-repo log" case_setup_runs_first
+run_case "setup failure is reported and skips the test cmd" case_setup_failure_skips_cmd
+run_case "setup hyphen→underscore variable name mapping" case_setup_hyphen_to_underscore_mapping
 
 if [ "$failures" -ne 0 ]; then
   echo "test_run_deterministic_tests: $failures FAILED"
