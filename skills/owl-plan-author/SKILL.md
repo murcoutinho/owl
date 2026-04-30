@@ -55,7 +55,7 @@ base-branch: owl/021-some-earlier-plan
 **`review-rounds: N`** — integer, clamped to `[1, 3]`. Default is 2.
 - Use `1` for small isolated changes (single file, <50 LOC).
 - Use `2` (or omit) for default-size plans.
-- Use `3` for large multi-repo refactors with significant risk.
+- Use `3` for large refactors with significant risk. (Cross-repo work should still be split into one plan per repo per Step 7 — `review-rounds: 3` applies to a single risky plan, not to bundling repos.)
 
 Note: Owl's actual reviewer count is controlled by local config, not by the plan file. Reviewer slots can now be disabled by setting their provider to `none` or leaving the model blank / setting it to `none` in Owl's private `.env.local`.
 
@@ -131,9 +131,11 @@ Required sections, in this order:
 Why this change is being made. What problem does it solve? What prompted it? Intended outcome.
 
 ### 2. Working directory
-Explicit path(s) to the repo(s). For multi-repo plans, list all repos and note they must be modified together.
+Name **one repo**. The default is one plan = one PR = one repo (see Step 7). If the broader feature spans repos, this section names only the repo this plan touches and references the companion plan number for the other repo.
 
-> Example: `API at <project-root>/project-api, web app at <project-root>/project-web. Both repos must be modified together.`
+> Single-repo example: `API at <project-root>/project-api. This plan is single-repo; the mobile companion is plan NNN.`
+
+For the rare multi-repo plan that meets Step 7's exception criteria, list all repos and add the explicit lockstep note: `Both repos must be modified together — see plan Context for why this was not split.`
 
 Use `<project-root>` as a placeholder for the operator's project directory — never hardcode a home path like `/Users/.../` or `/home/.../` in the skill. The skill ships in the public Owl repo; examples should work for any operator, not just the author.
 
@@ -164,7 +166,7 @@ Concrete instructions, file by file. Each file gets its own subsection: symbols 
 Explicit out-of-scope list. Prevents the agent from wandering into unrelated refactors.
 
 ### 6. Files to modify
-Flat list of every file path touched by this plan. Group by repo / layer (server / mobile / tests).
+Flat list of every file path touched by this plan, all under the single repo named in Section 2. (If you find yourself listing files from two repos, stop and split the plan per Step 7.) Group by layer where helpful (e.g. `api/`, `tests/`).
 
 ### 7. Verification
 How to confirm the plan worked end-to-end:
@@ -240,11 +242,49 @@ Pass the linter. Then — and only then — move the file into `owl/plan/` per S
 
 ---
 
-## Step 7 — Multi-repo / lockstep rules
+## Step 7 — One plan = one PR (split multi-repo work into chained plans)
 
-- If the plan changes an **API contract**, server and mobile must ship together. State "Both repos must be modified together" near the top of the plan.
-- If the plan touches **only one repo**, state so explicitly so reviewers don't hunt for missing changes.
-- Owl commits each repo separately and opens separate PRs. It does NOT synchronize merge timing — that's the operator's job.
+**Default rule: one plan produces exactly one pull request.** If the work spans two repos (e.g. server + mobile), queue **two plans**, not one — even when the changes are tightly coupled. Owl opens a separate PR per repo, so a single multi-repo plan still produces multiple PRs but bundles them under one review thread, one fix-iteration cycle, and one diff context. That is exactly what we want to avoid: each PR deserves its own focused review, its own test cycle, and its own merge decision.
+
+### Why split
+
+- Reviewers see **smaller, focused diffs** per PR instead of a server change buried in a mobile PR (or vice versa).
+- Each plan gets its **own review rounds and fix iterations**. A failing review on one repo does not block the other repo from progressing.
+- **Independent rollback**: if the mobile PR has a regression, you can revert it without also reverting the server PR.
+- **Test gates run separately** per repo, so a flaky mobile test does not gate the server merge (or vice versa).
+- **Comments and discussion stay scoped** to the repo they belong to; reviewers do not have to mentally context-switch.
+
+### How to split: chained plans with `base-branch`
+
+When the second repo's code depends on the first repo's code (e.g. mobile calls a new server endpoint), use the chaining pattern from **Step 3b**:
+
+1. **Plan A** (e.g. `NNN-server-add-foo-endpoint.md`) — server-only. No `base-branch:` (descends from `main`). Working directory section names only the server repo. Sections 4 and 6 list only server files.
+2. **Plan B** (e.g. `(NNN+1)-mobile-call-foo-endpoint.md`) — mobile-only. Frontmatter sets `base-branch: owl/NNN-server-add-foo-endpoint` so the mobile branch is created on top of the server branch and can call the new endpoint. Working directory section names only the mobile repo. Sections 4 and 6 list only mobile files.
+
+Under this pattern, the operator merges Plan A's server PR first, then Plan B's mobile PR — Owl's stale-ref fallback (see Step 3b) means Plan B works correctly whether or not Plan A's branch has been deleted from origin by the time Plan B runs.
+
+### When a single multi-repo plan IS acceptable (rare)
+
+Single-plan multi-repo work is acceptable only when **all** of these hold:
+
+- The two repos must change in genuinely atomic lockstep — e.g. a renamed enum value or wire-protocol field where one repo cannot land before the other for even a few hours without breaking production traffic.
+- The combined diff is small (well under ~200 LOC across both repos).
+- There is no useful independent review of either side.
+
+Even then, the **chained-plans pattern is preferred**, because Owl can sequence the merges via `base-branch` and you still get separate PRs that reviewers can sign off on independently. A single multi-repo plan should be a deliberate exception — write a one-line note in the plan's Context section explaining why splitting was rejected.
+
+### Plan body wording
+
+- A single-repo plan's Working Directory section names exactly one repo. Add a line: `This plan is single-repo (only <repo-name>). The companion change in <other-repo-name> is plan NNN.`
+- A chained plan's Working Directory section names its own repo. Reference the predecessor: `Depends on plan NNN (already queued / merged) for the new <symbol-or-endpoint>.`
+
+### What not to do
+
+- Do **not** queue one plan that lists files from two repos in Section 6. That bundles two PRs under one review cycle and is the pattern this rule exists to prevent.
+- Do **not** rely on filename order alone to sequence dependent plans across repos. Without `base-branch:`, the dependent plan's worktree is built from `main` and will not see the predecessor's changes.
+- Do **not** write a plan that touches no repo files (e.g. only docs or only schema notes); plans must produce a real diff in at least one repo, scoped to that repo.
+
+Owl commits each repo separately and opens separate PRs. It does **not** synchronize merge timing — that is the operator's job, but the chained-plans pattern at least ensures the merges happen in a safe order on the producer side.
 
 ---
 
