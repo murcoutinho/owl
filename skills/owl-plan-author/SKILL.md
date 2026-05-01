@@ -75,6 +75,30 @@ Use `base-branch` **only** when this plan has a **true code dependency** on anot
 
 Do NOT use `base-branch` just because two plans edit the same file. Non-overlapping edits to the same file merge cleanly via normal git; adding a chain there only creates rigidity. Reserve chains for genuine code dependencies.
 
+### Follow-up plans to open PRs
+
+If the user asks for a follow-up, continuation, fix, or enhancement to an
+open/unmerged PR, treat that open PR as the likely base even when the new plan
+could compile from `main`. This rule applies to **any open PR branch**, not only
+branches created by Owl.
+
+Before writing the plan, identify the open PR's head branch with `gh pr view`
+or the user's provided branch name. If the new plan is meant to preserve,
+extend, repair, or avoid regressing the open PR's behavior, set:
+
+```markdown
+---
+base-branch: <open-pr-head-branch>
+---
+```
+
+This is especially important when the follow-up touches the same workflow,
+screen, module, or files as the open PR. The earlier "do not chain just because
+two plans edit the same file" rule only applies to independent work. An
+unmerged PR that already contains accepted/working changes is not independent;
+stack on its branch unless the user explicitly says that PR has already merged
+into `main` or that the follow-up must intentionally start over from `main`.
+
 ### Branch name convention
 
 Owl derives branch names from plan filenames with the pattern `owl/<plan-filename-without-.md>`. So plan `031-mobile-extract-and-test-chat-db-row-mapping.md` lives on branch `owl/031-mobile-extract-and-test-chat-db-row-mapping`. Always use the full branch name in the frontmatter — no abbreviations.
@@ -117,7 +141,12 @@ One subtlety: Owl treats "branch not on origin right now" as the fallback trigge
 1. **Skipping the wiring entirely** because "they run in filename order anyway." Queue order is not a dependency contract. If the ancestor fails or stalls, the dependent will run on a base that does not contain the expected code and will fail in a confusing way. Declare dependencies explicitly.
 2. **Chaining low onto normal.** See the priority rule above.
 3. **Pointing at the original ancestor in a chain instead of the immediate predecessor.** See the transitive chains rule.
-4. **Using `base-branch` for every same-file edit.** Only for true code dependencies.
+4. **Starting a follow-up to an open PR from `main`.** If the work continues,
+   fixes, or must preserve an unmerged PR, stack on that PR's head branch even
+   if it is not an Owl branch.
+5. **Using `base-branch` for every same-file edit.** Only for true code
+   dependencies or open-PR follow-ups; independent same-file edits do not need a
+   chain.
 
 ---
 
