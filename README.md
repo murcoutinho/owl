@@ -122,6 +122,7 @@ Set env vars before running `src/owl.sh`:
 | `OWL_REVIEW_MODE` | `parallel` | `parallel` or `sequential`. |
 | `OWL_SKIP_LOW_PRIORITY` | `0` | When `1`, skip plans with `priority: low`. |
 | `OWL_TEST_CMD_<repo>` | unset | Optional deterministic test command for one repo. |
+| `OWL_TEST_SETUP_<repo>` | unset | Optional setup command run before `OWL_TEST_CMD_<repo>` (e.g. `npm ci` to install deps in a fresh worktree). A failing setup is reported as a test failure. |
 | `REVIEW_ITERATIONS` | `2` | Default review rounds if plan omits `review-rounds`. |
 | `RETRY_WAIT` | `600` | Seconds between rate-limit retries. |
 | `MAX_RETRIES` | `50` | Max retry attempts. |
@@ -147,6 +148,10 @@ OWL_REVIEWER2_MODEL=none
 
 OWL_TEST_CMD_project_api="python -m pytest -q --tb=short"
 OWL_TEST_CMD_project_web="npm test --silent"
+# Each plan runs in a fresh git worktree, which contains tracked files only.
+# Set OWL_TEST_SETUP_<repo> to install deps before tests run, or `jest` /
+# `pytest` plugins / etc. won't be on PATH and the suite will exit 127.
+OWL_TEST_SETUP_project_web="npm ci"
 ```
 
 ## Usage
@@ -201,7 +206,7 @@ The isolation model is deliberately simple:
 - **Scope is fenced at the repo layer.** Owl only touches directories listed in `OWL_TARGET_REPOS` that sit next to the `owl/` checkout. Everything outside that set is invisible to the agent.
 - **Execution happens in per-plan worktrees.** Owl reuses deterministic worktrees under `.work/worktrees/<plan>/` so the live sibling repos can stay dirty while a plan runs or waits for review resume.
 - **Humans still gate merges.** Owl opens pull requests — it does not merge them. Branch protection on your target repos is the last line of defense and should stay on.
-- **`OWL_TEST_CMD_<repo>` runs arbitrary shell.** Only set it from trusted `.env.local` config, never from plan content or LLM output.
+- **`OWL_TEST_CMD_<repo>` and `OWL_TEST_SETUP_<repo>` run arbitrary shell.** Only set them from trusted `.env.local` config, never from plan content or LLM output.
 - **The plan queue is trusted input.** Anyone who can write to `plan/` can direct the agent. Treat `plan/` the same way you treat your shell history or `~/.ssh/config`.
 
 Use Owl on repositories you own or are authorized to change, run it against a branch-protected target, and review every PR before merging. If you are not comfortable with an autonomous process pushing branches on your behalf, this is not the tool for you.

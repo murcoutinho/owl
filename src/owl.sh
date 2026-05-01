@@ -352,6 +352,10 @@ extract_reviewer_verdict() {
 # `OWL_TEST_CMD_<repo_name>` (hyphens replaced with underscores). If set, runs
 # the command in the repo root and captures combined stdout/stderr.
 #
+# If `OWL_TEST_SETUP_<repo_name>` is also set, it runs first in the same repo
+# root (e.g. `npm ci` to populate node_modules in a fresh worktree). A failing
+# setup is recorded as a failure and the test command is skipped for that repo.
+#
 # Writes a summary of failing suites to `$plan_work_dir/tests_$round.txt` — the
 # review loop appends that file to the combined review so the fix agent sees
 # test failures alongside LLM reviewer feedback.
@@ -369,10 +373,12 @@ run_deterministic_tests() {
   local any_failed=false
 
   while IFS= read -r -d '' repo_root; do
-    local repo_name var_name cmd
+    local repo_name cmd_var setup_var cmd setup_cmd
     repo_name="$(basename "$repo_root")"
-    var_name="OWL_TEST_CMD_${repo_name//-/_}"
-    cmd="${!var_name:-}"
+    cmd_var="OWL_TEST_CMD_${repo_name//-/_}"
+    setup_var="OWL_TEST_SETUP_${repo_name//-/_}"
+    cmd="${!cmd_var:-}"
+    setup_cmd="${!setup_var:-}"
 
     if [ -z "$cmd" ]; then
       continue
@@ -380,13 +386,35 @@ run_deterministic_tests() {
     any_configured=true
 
     local repo_log="$plan_work_dir/tests_${repo_name}_$round.log"
-    log "[Tests] $repo_name: $cmd"
+    : > "$repo_log"
 
-    # `eval` is safe here: `$cmd` comes from `OWL_TEST_CMD_<repo>` which is
-    # operator-controlled via .env.local, same trust boundary as every other
-    # OWL_ config var. Do NOT expose this to plan content or LLM output.
+    # `eval` is safe here: `$cmd` and `$setup_cmd` come from operator-controlled
+    # env vars in .env.local, same trust boundary as every other OWL_ config
+    # var. Do NOT expose either to plan content or LLM output.
+    if [ -n "$setup_cmd" ]; then
+      log "[Tests] $repo_name: setup: $setup_cmd"
+      local setup_rc=0
+      ( cd "$repo_root" && eval "$setup_cmd" ) >> "$repo_log" 2>&1 || setup_rc=$?
+      if [ "$setup_rc" -ne 0 ]; then
+        any_failed=true
+        log "[Tests] $repo_name: SETUP FAILED (exit=$setup_rc)"
+        {
+          echo "### $repo_name — test setup FAILED (exit=$setup_rc)"
+          echo ""
+          echo "Setup command: \`$setup_cmd\`"
+          echo ""
+          echo '```'
+          tail -n 200 "$repo_log"
+          echo '```'
+          echo ""
+        } >> "$summary_file"
+        continue
+      fi
+    fi
+
+    log "[Tests] $repo_name: $cmd"
     local rc=0
-    ( cd "$repo_root" && eval "$cmd" ) > "$repo_log" 2>&1 || rc=$?
+    ( cd "$repo_root" && eval "$cmd" ) >> "$repo_log" 2>&1 || rc=$?
 
     if [ "$rc" -ne 0 ]; then
       any_failed=true
