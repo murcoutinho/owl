@@ -156,6 +156,7 @@ OWL_TEST_CMD_project_web="npm test --silent"
 ./src/owl.sh                                  # poll plan/ and run the queue
 ./src/owl.sh --skip-low-priority              # daytime mode: defer priority: low
 ./src/owl.sh --validate plan/001-my-task.md   # dry-parse a plan, no LLM calls
+./src/owl.sh --run-plan plan/001-my-task.md   # run one selected plan, then exit
 tail -f agent.log
 ```
 
@@ -164,6 +165,7 @@ Notes:
 - `--doctor` does not call any LLM or touch git. Run it first on a new machine.
 - `--skip-low-priority` only skips plans with `priority: low`.
 - `--validate` does not call any model or touch git.
+- `--run-plan` skips the global queue lock and runs only the selected plan once. This lets you run two independent plans from separate terminals, but do not use it for plans that depend on each other via `base-branch`.
 - Plan authors can additionally run `./src/lint_plan.sh path/to/draft.md` as a standalone pre-queue lint that enforces repo-relative paths in a plan's "What to change" / "Files to modify" sections. The linter is not part of Owl's execution path — it's a local author check, deliberately separate from the runtime.
 - Owl runs plans in deterministic per-plan worktrees, so dirty source repos no longer block execution.
 
