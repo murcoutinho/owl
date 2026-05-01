@@ -76,6 +76,11 @@ SKIP_LOW_PRIORITY="${OWL_SKIP_LOW_PRIORITY:-0}"
 # acquiring the lock or entering the main loop. Set by --validate <path>.
 VALIDATE_PLAN_FILE=""
 
+# When set to a non-empty path, owl runs exactly that plan and exits without
+# acquiring the global queue lock. A per-plan lock still prevents accidentally
+# running the same selected plan twice.
+RUN_PLAN_FILE=""
+
 # When set to 1, owl runs run_doctor() and exits without acquiring the lock
 # or entering the main loop. Set by --doctor.
 DOCTOR_MODE=0
@@ -99,6 +104,14 @@ while [ "$#" -gt 0 ]; do
       VALIDATE_PLAN_FILE="$2"
       shift 2
       ;;
+    --run-plan)
+      if [ -z "${2:-}" ]; then
+        echo "error: --run-plan requires a plan file path" >&2
+        exit 2
+      fi
+      RUN_PLAN_FILE="$2"
+      shift 2
+      ;;
     --doctor)
       DOCTOR_MODE=1
       shift
@@ -106,7 +119,7 @@ while [ "$#" -gt 0 ]; do
     -h|--help)
       cat <<'HELPEOF'
 Usage: owl.sh [--skip-low-priority] [--include-low-priority]
-              [--validate <plan>] [--doctor]
+              [--validate <plan>] [--run-plan <plan>] [--doctor]
 
   --skip-low-priority     Skip plans whose frontmatter has `priority: low`.
                           Also honored via env var OWL_SKIP_LOW_PRIORITY=1.
@@ -115,6 +128,10 @@ Usage: owl.sh [--skip-low-priority] [--include-low-priority]
   --validate <plan>       Parse <plan> and print what the agent would do
                           without calling any LLM or touching git. Exits 0
                           on success; does not acquire the lock file.
+  --run-plan <plan>       Run exactly <plan> once, then exit. Does not acquire
+                          the global queue lock, so separate terminals can run
+                          different independent plans in parallel. A per-plan
+                          lock prevents running the same selected plan twice.
   --doctor                Check that required CLIs, credentials, and target
                           repos are in place. Does not call any LLM or touch
                           git. Run this first on a new machine.
@@ -131,6 +148,11 @@ HELPEOF
       ;;
   esac
 done
+
+if [ -n "$VALIDATE_PLAN_FILE" ] && [ -n "$RUN_PLAN_FILE" ]; then
+  echo "error: --validate and --run-plan cannot be used together" >&2
+  exit 2
+fi
 
 # Now enforce OWL_TARGET_REPOS for the real-run path. --validate and --doctor
 # both need to work without a configured queue so first-time users can debug
@@ -2245,6 +2267,44 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 
   if [ -n "$VALIDATE_PLAN_FILE" ]; then
     validate_plan
+    exit $?
+  fi
+
+  if [ -n "$RUN_PLAN_FILE" ]; then
+    if [ ! -f "$RUN_PLAN_FILE" ]; then
+      echo "error: plan file not found: $RUN_PLAN_FILE" >&2
+      exit 2
+    fi
+
+    if [ -d "$LOCK_FILE" ]; then
+      if kill -0 "$(cat "$LOCK_FILE/pid" 2>/dev/null)" 2>/dev/null; then
+        echo "Another agent instance is running (PID $(cat "$LOCK_FILE/pid")). Stop it before using --run-plan." >&2
+        exit 1
+      fi
+      log "Stale global lock found (process dead). Reclaiming."
+      rm -rf "$LOCK_FILE"
+    fi
+
+    plan_name="$(basename "$RUN_PLAN_FILE")"
+    plan_slug="${plan_name%.md}"
+    run_plan_lock_dir="$WORK_DIR/run-plan-locks/$plan_slug.lock"
+    mkdir -p "$(dirname "$run_plan_lock_dir")"
+    if ! mkdir "$run_plan_lock_dir" 2>/dev/null; then
+      if kill -0 "$(cat "$run_plan_lock_dir/pid" 2>/dev/null)" 2>/dev/null; then
+        echo "Selected plan is already running (PID $(cat "$run_plan_lock_dir/pid")): $plan_name" >&2
+        exit 1
+      fi
+      log "Stale selected-plan lock found for $plan_name. Reclaiming."
+      rm -rf "$run_plan_lock_dir"
+      mkdir "$run_plan_lock_dir"
+    fi
+    echo $$ > "$run_plan_lock_dir/pid"
+    trap 'rm -rf "$run_plan_lock_dir"' EXIT INT TERM
+
+    log "Dev Agent started in single-plan mode."
+    log "Selected plan: $RUN_PLAN_FILE"
+    log "Project directory: $PROJECT_DIR"
+    execute_plan "$RUN_PLAN_FILE"
     exit $?
   fi
 
