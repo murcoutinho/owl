@@ -194,6 +194,20 @@ Concrete instructions, file by file. Each file gets its own subsection: symbols 
 ### 5. What does NOT change
 Explicit out-of-scope list. Prevents the agent from wandering into unrelated refactors.
 
+This section MUST include a regression guard. The plan must explicitly say
+that the implementation is not allowed to fix or implement the requested change
+by breaking another existing feature, workflow, API contract, UI path,
+background job, or test-covered behavior. Name the nearby features that must
+keep working, especially call sites of changed functions, screens using changed
+components, API clients affected by changed response shapes, background jobs
+sharing modified helpers, and persisted data/resume flows touched by the plan.
+
+Required wording to include or adapt:
+
+> Do not introduce regressions in existing behavior. The requested change is
+> only acceptable if the surrounding features continue to work; do not solve
+> this plan by creating a new bug elsewhere.
+
 ### 6. Files to modify
 Flat list of every file path touched by this plan, all under the single repo named in Section 2. (If you find yourself listing files from two repos, stop and split the plan per Step 7.) Group by layer where helpful (e.g. `api/`, `tests/`).
 
@@ -201,6 +215,10 @@ Flat list of every file path touched by this plan, all under the single repo nam
 How to confirm the plan worked end-to-end:
 - Automated steps: compile, `pytest`, `tsc --noEmit`, grep for specific strings.
 - At least one manual test for UI changes.
+- Regression checks for nearby behavior that must keep working. Do not only
+  verify the new/fixed path; include at least one check for an existing adjacent
+  workflow, call site, or user path that could plausibly regress because of the
+  files being touched.
 
 **Note — Owl's deterministic test gate.** If the target repo has an
 `OWL_TEST_CMD_<repo>` command configured in Owl's private `.env.local`, Owl
