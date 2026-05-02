@@ -189,7 +189,27 @@ Owl ships a standalone linter (`src/lint_plan.sh`) for this rule. Run it on your
 File paths + approximate line numbers for code the plan depends on or will modify. Include short snippets when context matters. **Read the files before writing these — never guess line numbers.** Absolute paths are acceptable here — these are read before execution to verify the plan is grounded in real code.
 
 ### 4. What to change
-Concrete instructions, file by file. Each file gets its own subsection: symbols to add, modify, or remove. Include code snippets for non-trivial additions (especially new signatures or helpers).
+Concrete instructions, file by file. Each file gets its own subsection: symbols to add, modify, or remove.
+
+Prefer behavior, contracts, invariants, and constraints over full
+implementation code. A plan should tell the implementation agent what must be
+true after the change, not pre-write the whole patch.
+
+Use snippets only when they define a contract or remove dangerous ambiguity,
+for example:
+
+- a required function signature
+- an API request/response shape
+- an environment variable name and default
+- a short pseudocode sketch for tricky sequencing
+- an exact string that must appear in UI, logs, or docs
+
+Avoid long code blocks that implement whole functions/classes, exact internal
+control flow, premature helper abstractions, or test mocks written before
+matching the repo's current test style. Over-specified implementation snippets
+make agents preserve stale assumptions and can cause reviewers/fix agents to
+treat bad code as plan-compliant. Let the coding agent read the repo and choose
+the smallest safe implementation that satisfies the contract.
 
 ### 5. What does NOT change
 Explicit out-of-scope list. Prevents the agent from wandering into unrelated refactors.
