@@ -38,8 +38,8 @@ RETRY_WAIT=300
 MAX_RETRIES=2
 # Hard timeout on any single LLM subprocess. Prevents a stuck claude/codex CLI
 # from hanging Owl indefinitely while only emitting heartbeats. Override via
-# OWL_LLM_TIMEOUT in .env.local if 60 min isn't enough for the real workloads.
-LLM_TIMEOUT="${OWL_LLM_TIMEOUT:-3600}"
+# OWL_LLM_TIMEOUT in .env.local if 40 min isn't enough for the real workloads.
+LLM_TIMEOUT="${OWL_LLM_TIMEOUT:-2400}"
 POLL_INTERVAL_SECONDS="${OWL_POLL_INTERVAL_SECONDS:-600}"
 
 # Providers / models
