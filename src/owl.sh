@@ -66,6 +66,9 @@ REVIEW_MODE="${OWL_REVIEW_MODE:-parallel}"
 # run without requiring a full config (useful for first-time setup).
 TARGET_REPOS="${OWL_TARGET_REPOS:-}"
 
+# PR title prefix. Defaults to "[owl] ". Set to "" to disable.
+PR_PREFIX="${OWL_PR_PREFIX-[owl] }"
+
 # Low-priority plans are skipped when this is "1". Default: include everything.
 # Controlled by env var OWL_SKIP_LOW_PRIORITY or the CLI flag --skip-low-priority.
 # Use case: run during the day with --skip-low-priority to save tokens, then at
@@ -1236,7 +1239,7 @@ push_and_open_prs() {
     local pr_url
     pr_url=$(cd "$repo_root" && gh pr create \
       --base "$repo_pr_base" \
-      --title "[owl] ${plan_name%.md}" \
+      --title "${PR_PREFIX}${plan_name%.md}" \
       --body "$(cat <<EOF
 ## ${plan_name%.md}
 
