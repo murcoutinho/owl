@@ -10,7 +10,7 @@
 # 5. Mark pending review
 # 6. Review loop: reviewer LLMs check, Claude Code fixes (commits, no push)
 # 7. Push branch, open PRs
-# 8. Switch all repos back to main
+# 8. Switch all repos back to default branch
 # 9. Write done file
 #
 
@@ -162,6 +162,27 @@ if [ -z "$TARGET_REPOS" ] && [ -z "$VALIDATE_PLAN_FILE" ] && [ "$DOCTOR_MODE" !=
   echo "Run './src/owl.sh --doctor' to diagnose your setup." >&2
   exit 2
 fi
+
+# Detect the default branch for a repo (main or master). Tries the remote
+# HEAD first, falls back to checking which of main/master exists locally.
+repo_default_branch() {
+  local repo_root="$1"
+  # Prefer remote HEAD symref (most reliable after a fetch)
+  local remote_head
+  remote_head="$(git -C "$repo_root" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')" || true
+  if [ -n "$remote_head" ]; then
+    echo "$remote_head"
+    return
+  fi
+  # Fallback: check which branch exists on origin
+  if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
+    echo "main"
+  elif git -C "$repo_root" rev-parse --verify "refs/remotes/origin/master" >/dev/null 2>&1; then
+    echo "master"
+  else
+    echo "main"  # last resort
+  fi
+}
 
 # List repo roots for target repos only (null-delimited).
 find_repos_in_project_dir() {
@@ -1098,9 +1119,9 @@ reset_all_repos_to_base() {
   local base_branch="$1"
   local discard_owned_changes="${2:-0}"
   if [ -z "$base_branch" ]; then
-    log "Resetting all execution repos to main..."
+    log "Resetting all execution repos to default branch..."
   else
-    log "Resetting all execution repos to base branch '$base_branch' (fallback: main)..."
+    log "Resetting all execution repos to base branch '$base_branch' (fallback: default branch)..."
   fi
 
   while IFS= read -r -d '' repo_root; do
@@ -1139,8 +1160,10 @@ reset_all_repos_to_base() {
     # base plan was merged and its upstream branch auto-deleted. That stale-
     # ref trap would make the dependent plan run on yesterday's base instead
     # of today's main.
-    local target_branch="main"
-    local target_ref="main"
+    local default_branch
+    default_branch="$(repo_default_branch "$repo_root")"
+    local target_branch="$default_branch"
+    local target_ref="$default_branch"
     if [ -n "$base_branch" ]; then
       if git -C "$repo_root" fetch origin "$base_branch" 2>/dev/null && \
          git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
@@ -1148,14 +1171,14 @@ reset_all_repos_to_base() {
         target_ref="refs/remotes/origin/$base_branch"
         log "  $repo_name: using base branch '$base_branch' from origin"
       else
-        log "  $repo_name: base branch '$base_branch' not on origin — falling back to main"
+        log "  $repo_name: base branch '$base_branch' not on origin — falling back to $default_branch"
         # Prune the stale cached ref if one exists, so any later command on
         # this repo does not accidentally resurrect it.
         git -C "$repo_root" update-ref -d "refs/remotes/origin/$base_branch" 2>/dev/null || true
       fi
-    elif git -C "$repo_root" fetch origin main 2>/dev/null && \
-         git -C "$repo_root" rev-parse --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
-      target_ref="refs/remotes/origin/main"
+    elif git -C "$repo_root" fetch origin "$default_branch" 2>/dev/null && \
+         git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$default_branch" >/dev/null 2>&1; then
+      target_ref="refs/remotes/origin/$default_branch"
     fi
 
     log "  $repo_name: detaching worktree at '$target_branch'"
@@ -1198,13 +1221,15 @@ push_and_open_prs() {
       continue
     fi
 
-    # Determine the PR base for this repo. Default to main; if the plan
-    # declared a base branch AND origin CURRENTLY has it, target that
-    # instead. Same stale-ref defense as reset_all_repos_to_base: require
-    # the explicit fetch to succeed, not just the cached ref to exist.
-    # Otherwise `gh pr create --base <deleted-branch>` would fail after the
-    # ancestor plan merged and its branch was auto-deleted.
-    local repo_pr_base="main"
+    # Determine the PR base for this repo. Default to the repo's default
+    # branch; if the plan declared a base branch AND origin CURRENTLY has
+    # it, target that instead. Same stale-ref defense as
+    # reset_all_repos_to_base: require the explicit fetch to succeed, not
+    # just the cached ref to exist. Otherwise `gh pr create --base
+    # <deleted-branch>` would fail after the ancestor plan merged and its
+    # branch was auto-deleted.
+    local repo_pr_base
+    repo_pr_base="$(repo_default_branch "$repo_root")"
     if [ -n "$pr_base_branch" ]; then
       if git -C "$repo_root" fetch origin "$pr_base_branch" 2>/dev/null && \
          git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$pr_base_branch" >/dev/null 2>&1; then
@@ -1264,12 +1289,14 @@ EOF
   ! $had_pr_failure
 }
 
-# ─── Step 8: Switch all repos back to main ───
+# ─── Step 8: Switch all repos back to default branch ───
 switch_all_to_main() {
   while IFS= read -r -d '' repo_root; do
     if git -C "$repo_root" rev-parse --verify HEAD >/dev/null 2>&1; then
-      git -C "$repo_root" checkout --detach main >/dev/null 2>>"$LOG_FILE" || \
-        log "  $(basename "$repo_root"): WARNING — failed to detach at main"
+      local default_branch
+      default_branch="$(repo_default_branch "$repo_root")"
+      git -C "$repo_root" checkout --detach "$default_branch" >/dev/null 2>>"$LOG_FILE" || \
+        log "  $(basename "$repo_root"): WARNING — failed to detach at $default_branch"
     fi
   done < <(find_target_repos)
 }
@@ -1420,7 +1447,7 @@ PLANEOF
     fi
 
     log "Plan produced no changes in any repo. Marking done with no-op summary."
-    log "[Step 5] Switching all repos back to main..."
+    log "[Step 5] Switching all repos back to default branch..."
     switch_all_to_main
     cleanup_plan_workspace "$plan_slug" "$plan_work_dir"
     write_done_file "$plan_file" "$plan_name" "$plan_work_dir" 0 0 \
@@ -1951,7 +1978,7 @@ FIXEOF
   fi
 
   # ── Step 8: Switch back to main ──
-  log "[Step 8] Switching all repos back to main..."
+  log "[Step 8] Switching all repos back to default branch..."
   switch_all_to_main
   cleanup_plan_workspace "$plan_slug" "$plan_work_dir"
 
@@ -2122,7 +2149,7 @@ validate_plan() {
       if git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$base_branch" >/dev/null 2>&1; then
         echo "      would use base: $base_branch"
       else
-        echo "      would fall back to main (base '$base_branch' not cached locally)"
+        echo "      would fall back to default branch (base '$base_branch' not cached locally)"
       fi
     fi
   done < <(find_source_target_repos)
