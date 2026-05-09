@@ -228,6 +228,25 @@ Required wording to include or adapt:
 > only acceptable if the surrounding features continue to work; do not solve
 > this plan by creating a new bug elsewhere.
 
+This section MUST also include a no-plan-references rule, with the literal
+sentinel `No plan-number references in code` (the linter checks for this
+exact phrase). Plan files are deleted from `owl/plan/` once Owl finishes
+them, so any `plan N` token left in the repo becomes a dangling pointer the
+next reader cannot resolve. The implementation agent has to be told this
+explicitly — without the rule, agents reflexively reach for the plan number
+as a citation when explaining a non-obvious decision.
+
+Required wording to include verbatim:
+
+> No plan-number references in code. The implementation must NOT mention
+> plan numbers (e.g. "plan 192", "Plan 197", "see plan 134") in source
+> code, comments, docstrings, commit messages, test names, test docstrings,
+> log messages, or migration docstrings. Plan files do not survive the
+> queue — every `plan N` reference rots into a dangling pointer. Inline
+> the actual *reason* (the constraint, the bug it fixes, the contract it
+> upholds) instead. The plan number belongs in the PR description and
+> commit metadata only.
+
 ### 6. Files to modify
 Flat list of every file path touched by this plan, all under the single repo named in Section 2. (If you find yourself listing files from two repos, stop and split the plan per Step 7.) Group by layer where helpful (e.g. `api/`, `tests/`).
 
@@ -290,12 +309,14 @@ Output:
 - Exit 1 + a list of offending lines with column-aligned snippets — plan has violations; fix and re-run.
 
 What the linter scans:
-- Only Sections titled **"What to change"** and **"Files to modify"**.
+- The full plan body for the **no-plan-references sentinel** (Step 4 §5).
+- Sections titled **"What to change"** and **"Files to modify"** for edit-target path rules.
 - Ignores YAML frontmatter and fenced code blocks — snippet contents are never flagged.
 
-What counts as a violation in those two sections:
-- Any absolute filesystem path (anything starting with `/`).
-- The placeholder `<project-root>/` — it's a documentation marker, not a valid edit target.
+What counts as a violation:
+- The literal sentinel `No plan-number references in code` is missing from the plan body. Authors must include the verbatim wording from Step 4 §5 so the implementation agent gets the directive.
+- In "What to change" / "Files to modify": any absolute filesystem path (anything starting with `/`).
+- In "What to change" / "Files to modify": the placeholder `<project-root>/` — it's a documentation marker, not a valid edit target.
 
 What counts as **OK**:
 - Repo-relative paths like `pipeline/foo.py` or `<repo-name>/pipeline/foo.py`.

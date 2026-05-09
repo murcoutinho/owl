@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # Pre-queue linter for Owl plan files.
 #
-# Enforces the edit-target path rule from the owl-plan-author skill:
-# Sections titled "What to change" and "Files to modify" must reference
-# files by repo-relative path — never by absolute source path, never by
-# the placeholder `<project-root>/...`. Violations commonly cause the
-# "Plan produced no changes in any repo" silent-leak failure, because
-# the agent edits the source repo instead of Owl's per-plan worktree.
+# Enforces two rules from the owl-plan-author skill:
+#
+#   1. Edit-target path rule. Sections titled "What to change" and
+#      "Files to modify" must reference files by repo-relative path —
+#      never by absolute source path, never by the placeholder
+#      `<project-root>/...`. Violations commonly cause the "Plan
+#      produced no changes in any repo" silent-leak failure, because
+#      the agent edits the source repo instead of Owl's per-plan
+#      worktree.
+#
+#   2. No-plan-references sentinel. Plan files are deleted from the
+#      queue when Owl finishes them, so any "plan N" reference that
+#      sneaks into shipped code becomes a dangling pointer. Plans must
+#      include the literal sentinel "No plan-number references in code"
+#      somewhere in the plan body so the implementation agent receives
+#      the directive. Without it, agents reflexively cite plan numbers
+#      in comments, docstrings, and test names.
 #
 # This script is deliberately standalone. It does NOT share code with
 # src/owl.sh — Owl's runtime never runs this lint. Authors invoke it
@@ -51,6 +62,20 @@ plan_file="$1"
 if [ ! -f "$plan_file" ]; then
   echo "lint_plan: file not found: $plan_file" >&2
   exit 2
+fi
+
+# Rule 2 check: the plan body must contain the no-plan-references sentinel.
+# Match is case-insensitive and tolerates surrounding markdown punctuation
+# (asterisks, backticks, quotes, list markers) so authors can wrap the
+# sentinel as a heading, bold span, or blockquote without tripping the
+# lint. We grep the full file because the sentinel may live in section 5
+# either as a bullet or as a blockquote — both are acceptable per the
+# skill's required wording.
+sentinel_pattern='[Nn]o plan-number references in code'
+if ! grep -qE "$sentinel_pattern" "$plan_file"; then
+  sentinel_missing=1
+else
+  sentinel_missing=0
 fi
 
 violations=$(awk '
@@ -111,21 +136,38 @@ violations=$(awk '
   }
 ' "$plan_file")
 
-if [ -z "$violations" ]; then
-  echo "lint_plan: $plan_file — OK (0 edit-target path violations)"
+if [ -z "$violations" ] && [ "$sentinel_missing" = "0" ]; then
+  echo "lint_plan: $plan_file — OK (0 violations)"
   exit 0
 fi
 
 echo "lint_plan: $plan_file — FAIL"
 echo ""
-echo "Edit-target path violations (Sections 'What to change' / 'Files to modify'):"
-while IFS=$'\t' read -r line_no offender full_line; do
-  [ -n "$line_no" ] || continue
-  echo "  line $line_no: $offender"
-  echo "    > $full_line"
-done <<< "$violations"
-echo ""
-echo "Those sections must use repo-relative paths (e.g. 'pipeline/foo.py'"
-echo "or '<repo-name>/pipeline/foo.py'). Absolute source paths and the"
-echo "<project-root>/ placeholder belong only in Section 3 (anchors)."
+
+if [ -n "$violations" ]; then
+  echo "Edit-target path violations (Sections 'What to change' / 'Files to modify'):"
+  while IFS=$'\t' read -r line_no offender full_line; do
+    [ -n "$line_no" ] || continue
+    echo "  line $line_no: $offender"
+    echo "    > $full_line"
+  done <<< "$violations"
+  echo ""
+  echo "Those sections must use repo-relative paths (e.g. 'pipeline/foo.py'"
+  echo "or '<repo-name>/pipeline/foo.py'). Absolute source paths and the"
+  echo "<project-root>/ placeholder belong only in Section 3 (anchors)."
+  echo ""
+fi
+
+if [ "$sentinel_missing" = "1" ]; then
+  echo "Missing sentinel: 'No plan-number references in code'"
+  echo "  > Plans must include this directive verbatim in section 5"
+  echo "    ('What does NOT change'). It tells the implementation agent"
+  echo "    not to mention plan numbers in shipped code, comments,"
+  echo "    docstrings, commit messages, test names, or log messages."
+  echo "    Plan files are deleted after merge — every 'plan N' reference"
+  echo "    in the codebase becomes a dangling pointer."
+  echo ""
+  echo "    See SKILL.md Step 4 §5 for the required wording to copy in."
+fi
+
 exit 1
