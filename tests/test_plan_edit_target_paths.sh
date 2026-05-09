@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Regression test for the standalone pre-queue plan linter
-# (src/lint_plan.sh). Verifies the two core behaviors:
+# (src/lint_plan.sh). Verifies the core behaviors:
 #   - Absolute source paths or `<project-root>/` placeholders in
 #     Sections "What to change" / "Files to modify" fail the lint.
 #   - Repo-relative paths in those sections pass.
 #   - Absolute paths elsewhere (Section 3 anchors, prose) are ignored.
+#   - The 'No plan-number references in code' sentinel must appear in
+#     the plan body; missing sentinel fails the lint.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +54,9 @@ Should pass the linter.
 - Edit `repo-a/src/foo.py` to add a helper.
 - Also touch `repo-a/tests/test_foo.py`.
 
+## What does NOT change
+- No plan-number references in code.
+
 ## Files to modify
 - repo-a/src/foo.py
 - repo-a/tests/test_foo.py
@@ -71,6 +76,9 @@ Should fail the linter.
 ## What to change
 - Edit `/Users/someone/project/repo-a/src/foo.py`.
 
+## What does NOT change
+- No plan-number references in code.
+
 ## Files to modify
 - repo-a/src/foo.py
 EOF
@@ -88,6 +96,9 @@ Should fail the linter.
 
 ## What to change
 - Edit <project-root>/repo-a/src/foo.py.
+
+## What does NOT change
+- No plan-number references in code.
 
 ## Files to modify
 - <project-root>/repo-a/src/foo.py
@@ -113,6 +124,30 @@ def foo():
     pass
 ```
 
+## What does NOT change
+- No plan-number references in code.
+
+## Files to modify
+- repo-a/src/foo.py
+EOF
+
+missing_sentinel_plan="$TMPDIR/005-missing-sentinel.md"
+cat > "$missing_sentinel_plan" <<'EOF'
+---
+priority: low
+---
+
+# 005 — clean edit targets but no sentinel
+
+## Context
+Should fail the linter because the no-plan-references sentinel is missing.
+
+## What to change
+- Edit `repo-a/src/foo.py`.
+
+## What does NOT change
+- Out of scope: anything in repo-b.
+
 ## Files to modify
 - repo-a/src/foo.py
 EOF
@@ -127,8 +162,24 @@ case_accepts_repo_relative() {
     echo "$out" >&2
     return 1
   fi
-  echo "$out" | grep -q "OK (0 edit-target path violations)" || {
+  echo "$out" | grep -q "OK (0 violations)" || {
     echo "    expected OK message, got:" >&2
+    echo "$out" >&2
+    return 1
+  }
+  return 0
+}
+
+case_rejects_missing_sentinel() {
+  local out rc=0
+  out=$("$LINT" "$missing_sentinel_plan" 2>&1) || rc=$?
+  if [ "$rc" -ne 1 ]; then
+    echo "    expected exit 1 for missing sentinel, got $rc. Output:" >&2
+    echo "$out" >&2
+    return 1
+  fi
+  echo "$out" | grep -q "Missing sentinel: 'No plan-number references in code'" || {
+    echo "    expected missing-sentinel message, got:" >&2
     echo "$out" >&2
     return 1
   }
@@ -197,6 +248,7 @@ run_case "accepts repo-relative edit targets" case_accepts_repo_relative
 run_case "rejects absolute paths in edit-target sections" case_rejects_absolute
 run_case "rejects <project-root>/ placeholder" case_rejects_placeholder
 run_case "ignores absolute paths inside fenced code blocks" case_ignores_code_fence
+run_case "rejects plan missing the no-plan-references sentinel" case_rejects_missing_sentinel
 run_case "returns usage error for missing file" case_missing_file_usage_error
 
 if [ "$failures" -ne 0 ]; then
