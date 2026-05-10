@@ -139,10 +139,9 @@ depends-on:
 ---
 # Plan
 EOF
-  local out expected
+  local out
   out=$(parse_plan_dependencies "$plan_file")
-  expected=$(printf 'repo-a\t100')
-  assert_eq "$expected" "$out" "single dep parsed" || return 1
+  assert_eq "repo-a|100" "$out" "single dep parsed" || return 1
   return 0
 }
 
@@ -162,7 +161,7 @@ review-rounds: 2
 EOF
   local out expected
   out=$(parse_plan_dependencies "$plan_file")
-  expected=$(printf 'repo-a\t100\nrepo-b\t099')
+  expected=$(printf 'repo-a|100\nrepo-b|099')
   assert_eq "$expected" "$out" "multiple deps parsed in order; later top-level keys end the block" || return 1
   return 0
 }
@@ -177,10 +176,9 @@ depends-on:
 ---
 # Plan
 EOF
-  local out expected
+  local out
   out=$(parse_plan_dependencies "$plan_file")
-  expected=$(printf 'repo-a\t199')
-  assert_eq "$expected" "$out" "quoted values stripped" || return 1
+  assert_eq "repo-a|199" "$out" "quoted values stripped" || return 1
   return 0
 }
 
@@ -458,7 +456,7 @@ EOF
 
 # ---- Validation ----------------------------------------------------------
 
-case_validate_reports_dependencies() {
+case_validate_reports_dependencies_and_fails_on_errors() {
   local plan_file="$TMPDIR/validate-dep.md"
   cat > "$plan_file" <<'EOF'
 ---
@@ -478,7 +476,11 @@ EOF
   out=$(validate_plan 2>&1) || rc=$?
   VALIDATE_PLAN_FILE=""
 
-  assert_eq 0 "$rc" "validate exit 0 even with declared error (validation reports it)" || return 1
+  # Per the contract, an unknown dependency repo must hard-fail validation
+  # so bad plans do not pass operator/CI checks. The validate output still
+  # has to enumerate every parsed entry first so the operator can see what
+  # was wrong.
+  assert_eq 1 "$rc" "validate returns non-zero when a dep repo is unknown" || return 1
   if ! printf '%s\n' "$out" | grep -q "Cross-repo dependencies:"; then
     echo "  FAIL: validate output missing 'Cross-repo dependencies:' section" >&2
     printf '%s\n' "$out" >&2
@@ -494,6 +496,129 @@ EOF
   fi
   if ! printf '%s\n' "$out" | grep -q "ERROR: repo 'not-a-target-repo' not in OWL_TARGET_REPOS"; then
     echo "  FAIL: validate output missing repo-error row" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$out" | grep -q "validation FAILED"; then
+    echo "  FAIL: validate output missing 'validation FAILED' summary" >&2
+    return 1
+  fi
+  return 0
+}
+
+case_validate_passes_when_all_deps_resolve() {
+  # Sanity-check: a plan whose only dep declares a configured repo and a
+  # resolvable plan number must still validate green, even if the branch
+  # hasn't shown up on origin yet (deferral is a runtime concern, not a
+  # validation error).
+  local plan_file="$TMPDIR/validate-clean.md"
+  cat > "$plan_file" <<'EOF'
+---
+depends-on:
+  - repo: repo-a
+    plan: 100
+---
+# Plan
+No plan-number references in code.
+EOF
+
+  VALIDATE_PLAN_FILE="$plan_file"
+  local out rc=0
+  out=$(validate_plan 2>&1) || rc=$?
+  VALIDATE_PLAN_FILE=""
+
+  assert_eq 0 "$rc" "clean dep validation returns 0" || return 1
+  if ! printf '%s\n' "$out" | grep -q "validation OK"; then
+    echo "  FAIL: clean validation should print 'validation OK'" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ---- Malformed entries (required-field contract) -------------------------
+
+case_parser_emits_missing_plan() {
+  # Plan contract: `plan` is required. The parser must emit malformed
+  # entries (with the missing field empty) so downstream code can detect
+  # and hard-fail rather than silently dropping them and running the
+  # consumer with no dep context.
+  local plan_file="$TMPDIR/missing-plan.md"
+  cat > "$plan_file" <<'EOF'
+---
+depends-on:
+  - repo: repo-a
+---
+# Plan
+EOF
+  local out
+  out=$(parse_plan_dependencies "$plan_file")
+  assert_eq "repo-a|" "$out" "missing plan field is still emitted (with empty plan)" || return 1
+  return 0
+}
+
+case_parser_emits_missing_repo() {
+  local plan_file="$TMPDIR/missing-repo.md"
+  cat > "$plan_file" <<'EOF'
+---
+depends-on:
+  - plan: 100
+---
+# Plan
+EOF
+  local out
+  out=$(parse_plan_dependencies "$plan_file")
+  assert_eq "|100" "$out" "missing repo field is still emitted (with empty repo)" || return 1
+  return 0
+}
+
+case_resolver_missing_plan_field_errors() {
+  local plan="$TMPDIR/missing-plan-resolver.md"
+  cat > "$plan" <<'EOF'
+---
+depends-on:
+  - repo: repo-a
+---
+EOF
+  local ctx="$TMPDIR/ctx-missing-plan.txt"
+  local rc=0
+  resolve_plan_dependencies "$plan" "$TMPDIR" "$ctx" || rc=$?
+  assert_eq 2 "$rc" "missing plan → rc=2 (error)" || return 1
+  assert_grep "missing required 'plan' field" "$ctx" "ctx records missing-plan error" || return 1
+  return 0
+}
+
+case_resolver_missing_repo_field_errors() {
+  local plan="$TMPDIR/missing-repo-resolver.md"
+  cat > "$plan" <<'EOF'
+---
+depends-on:
+  - plan: 100
+---
+EOF
+  local ctx="$TMPDIR/ctx-missing-repo.txt"
+  local rc=0
+  resolve_plan_dependencies "$plan" "$TMPDIR" "$ctx" || rc=$?
+  assert_eq 2 "$rc" "missing repo → rc=2 (error)" || return 1
+  assert_grep "missing required 'repo' field" "$ctx" "ctx records missing-repo error" || return 1
+  return 0
+}
+
+case_validate_fails_on_missing_field() {
+  local plan="$TMPDIR/validate-missing-field.md"
+  cat > "$plan" <<'EOF'
+---
+depends-on:
+  - repo: repo-a
+---
+EOF
+  VALIDATE_PLAN_FILE="$plan"
+  local out rc=0
+  out=$(validate_plan 2>&1) || rc=$?
+  VALIDATE_PLAN_FILE=""
+  assert_eq 1 "$rc" "validate fails when a required field is missing" || return 1
+  if ! printf '%s\n' "$out" | grep -q "missing required 'plan' field"; then
+    echo "  FAIL: validate output should call out the missing 'plan' field" >&2
+    printf '%s\n' "$out" >&2
     return 1
   fi
   return 0
@@ -518,7 +643,13 @@ run_case "resolve: branch in wrong repo is ignored" case_resolver_branch_in_wron
 run_case "resolve: branch in declared repo → ctx populated" case_resolver_branch_available_emits_context
 run_case "resolve: done dep → done-file context" case_resolver_done_dependency_uses_done_file_context
 run_case "review prompt includes dependency context" case_review_prompt_includes_dependency_context
-run_case "validate reports parsed deps + errors" case_validate_reports_dependencies
+run_case "parser emits entry with missing plan field" case_parser_emits_missing_plan
+run_case "parser emits entry with missing repo field" case_parser_emits_missing_repo
+run_case "resolve: missing plan field → rc=2" case_resolver_missing_plan_field_errors
+run_case "resolve: missing repo field → rc=2" case_resolver_missing_repo_field_errors
+run_case "validate fails on missing field" case_validate_fails_on_missing_field
+run_case "validate fails when dep repo unknown (and reports it)" case_validate_reports_dependencies_and_fails_on_errors
+run_case "validate passes when all deps resolve" case_validate_passes_when_all_deps_resolve
 
 if [ "$failures" -ne 0 ]; then
   echo "test_cross_repo_plan_dependencies: $failures FAILED"

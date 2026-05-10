@@ -870,17 +870,28 @@ parse_plan_base_branch() {
 #     - repo: raven
 #       plan: 200
 #
-# Prints one line per dependency in the form `<repo>\t<plan_number>`.
+# Prints one line per dependency in the form `<repo>|<plan_number>`.
 # Empty output when the plan declares no dependencies. Order matches the
 # author's declaration order. The parser deliberately supports only this
 # block shape, not the broader YAML grammar — the spec calls out flow-style
 # (`{repo: x, plan: 1}`) and inline lists as out of scope.
+#
+# Why `|` and not `\t`: bash `read` with a whitespace IFS collapses
+# consecutive whitespace delimiters and strips leading whitespace, so a
+# malformed entry like `- plan: 100` (no repo) would get its empty-repo
+# field swallowed and downstream code would silently mis-pair fields.
+# Pipe is non-whitespace, never appears in repo names or plan numbers.
 parse_plan_dependencies() {
   local plan_file="$1"
   awk '
+    # Emit when at least one field is set so the caller can detect and
+    # hard-fail on entries missing a required field (`repo` or `plan`).
+    # Silently dropping malformed entries used to let a plan with e.g.
+    # `- repo: saudade` (no plan number) execute as if it had no deps,
+    # which violates the required-field contract.
     function flush() {
-      if (current_repo != "" && current_plan != "") {
-        print current_repo "\t" current_plan
+      if (current_repo != "" || current_plan != "") {
+        print current_repo "|" current_plan
       }
       current_repo = ""
       current_plan = ""
@@ -1143,12 +1154,41 @@ resolve_plan_dependencies() {
   local should_defer=false
   local has_error=false
 
-  while IFS=$'\t' read -r dep_repo dep_plan_num; do
-    [ -n "$dep_repo" ] || continue
-    [ -n "$dep_plan_num" ] || continue
+  while IFS='|' read -r dep_repo dep_plan_num; do
+    # Skip wholly-empty rows defensively; the parser only emits a row
+    # when at least one field is set, but a stray blank line shouldn't
+    # count as a dependency.
+    if [ -z "$dep_repo" ] && [ -z "$dep_plan_num" ]; then
+      continue
+    fi
     dep_count=$((dep_count + 1))
 
-    log "[Dependency $dep_count] declared: repo=$dep_repo plan=$dep_plan_num"
+    log "[Dependency $dep_count] declared: repo='${dep_repo}' plan='${dep_plan_num}'"
+
+    # Required-field check: missing repo OR missing plan is a hard error.
+    # Plan contract: "repo is required. plan is required and must be numeric."
+    if [ -z "$dep_repo" ]; then
+      log "  ERROR: depends-on entry is missing 'repo' field (plan='$dep_plan_num')"
+      {
+        echo ""
+        echo "### Dependency: repo=(missing) plan=$dep_plan_num"
+        echo ""
+        echo "- ERROR: depends-on entry is missing required 'repo' field"
+      } >> "$context_file"
+      has_error=true
+      continue
+    fi
+    if [ -z "$dep_plan_num" ]; then
+      log "  ERROR: depends-on entry is missing 'plan' field (repo='$dep_repo')"
+      {
+        echo ""
+        echo "### Dependency: repo=$dep_repo plan=(missing)"
+        echo ""
+        echo "- ERROR: depends-on entry is missing required 'plan' field"
+      } >> "$context_file"
+      has_error=true
+      continue
+    fi
 
     if [[ ! "$dep_plan_num" =~ ^[0-9]+$ ]]; then
       log "  ERROR: plan number '$dep_plan_num' is not numeric"
@@ -2594,20 +2634,36 @@ validate_plan() {
 
   # 6. Cross-repo dependencies. Validation is read-only: we never fetch.
   # Anything reported as "not visible locally" may still resolve at execution
-  # time once the worktree fetches origin.
-  local deps
+  # time once the worktree fetches origin. Hard errors (unknown repo, missing
+  # plan file, missing required field) make this whole validation fail —
+  # silently passing them through would let a malformed plan slip past
+  # operator/CI checks and explode at runtime.
+  local deps dep_errors=0
   deps="$(parse_plan_dependencies "$plan_file")"
   echo "Cross-repo dependencies:"
   if [ -z "$deps" ]; then
     echo "  (none declared)"
   else
-    while IFS=$'\t' read -r dep_repo dep_plan_num; do
-      [ -n "$dep_repo" ] || continue
-      [ -n "$dep_plan_num" ] || continue
-      echo "  - repo: $dep_repo, plan: $dep_plan_num"
+    while IFS='|' read -r dep_repo dep_plan_num; do
+      if [ -z "$dep_repo" ] && [ -z "$dep_plan_num" ]; then
+        continue
+      fi
+      echo "  - repo: ${dep_repo:-(missing)}, plan: ${dep_plan_num:-(missing)}"
+
+      if [ -z "$dep_repo" ]; then
+        echo "      ERROR: depends-on entry is missing required 'repo' field"
+        dep_errors=$((dep_errors + 1))
+        continue
+      fi
+      if [ -z "$dep_plan_num" ]; then
+        echo "      ERROR: depends-on entry is missing required 'plan' field"
+        dep_errors=$((dep_errors + 1))
+        continue
+      fi
 
       if [[ ! "$dep_plan_num" =~ ^[0-9]+$ ]]; then
         echo "      ERROR: plan number is not numeric"
+        dep_errors=$((dep_errors + 1))
         continue
       fi
 
@@ -2620,6 +2676,7 @@ validate_plan() {
       done
       if ! $repo_configured; then
         echo "      ERROR: repo '$dep_repo' not in OWL_TARGET_REPOS"
+        dep_errors=$((dep_errors + 1))
         continue
       fi
       echo "      repo configured: yes"
@@ -2628,6 +2685,7 @@ validate_plan() {
       dep_plan_file="$(resolve_dependency_plan_file "$dep_plan_num" 2>/dev/null || true)"
       if [ -z "$dep_plan_file" ]; then
         echo "      ERROR: no plan file with prefix $dep_plan_num in plan/ or plan/done/"
+        dep_errors=$((dep_errors + 1))
         continue
       fi
       local rel_plan
@@ -2653,6 +2711,10 @@ validate_plan() {
   fi
   echo ""
 
+  if [ "$dep_errors" -gt 0 ]; then
+    echo "validation FAILED -- $dep_errors cross-repo dependency error(s); fix the plan before queueing"
+    return 1
+  fi
   echo "validation OK -- run without --validate to execute"
   return 0
 }
