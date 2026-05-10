@@ -49,6 +49,9 @@ All fields are optional. Include only what applies.
 review-rounds: 2
 priority: low
 base-branch: owl/021-some-earlier-plan
+depends-on:
+  - repo: project-api
+    plan: 199
 ---
 ```
 
@@ -62,6 +65,13 @@ Note: Owl's actual reviewer count is controlled by local config, not by the plan
 **`priority: low`** — marks as low-priority. Each cycle drains normal-priority plans in filename order first, then low-priority plans in filename order — so a `priority: low` plan with a smaller numeric prefix will still run *after* every normal plan, not before. With `--skip-low-priority` (or `OWL_SKIP_LOW_PRIORITY=1`), these plans are bypassed entirely on every cycle and only drain when the flag is dropped. Use for nice-to-haves that shouldn't compete with active work.
 
 **`base-branch: <branch-name>`** — start from this branch instead of `main`. See *Step 3b* below for the complete wiring rules; they are non-obvious enough to deserve their own step.
+
+**`depends-on: [...]`** — declare cross-repo plan dependencies. Use this when a plan in this repo must integrate against a contract (CLI flag, API response shape, exported symbol) produced by a plan in *another* repo. See *Step 3c* below for the rules. `depends-on` is fundamentally different from `base-branch`:
+
+- `base-branch` is a **same-repo** code checkout dependency. It changes the branch the worktree starts from for the same repo.
+- `depends-on` is a **cross-repo** contract/context dependency. It does NOT change the current repo's checkout. It tells Owl where to look for the dependency, injects that dependency's diff/PR/contract into the coder/reviewer/fix prompts, and (when the dependency is still queued and has not produced a branch yet) defers the dependent plan to a later cycle.
+
+Use both together if a single plan needs both — e.g. a follow-up that stacks on its own repo's open PR (`base-branch:`) AND must integrate against another repo's contract (`depends-on:`).
 
 ---
 
@@ -147,6 +157,76 @@ One subtlety: Owl treats "branch not on origin right now" as the fallback trigge
 5. **Using `base-branch` for every same-file edit.** Only for true code
    dependencies or open-PR follow-ups; independent same-file edits do not need a
    chain.
+
+---
+
+## Step 3c — Wiring cross-repo dependencies with `depends-on`
+
+`depends-on` is the *cross-repo* analogue of `base-branch`. Use it when this plan must integrate against a contract produced by a plan in a different target repo — for example, the mobile plan calling a new API endpoint that ships in the server plan, or a control plane plan that consumes the response shape produced by a runtime-config plan. It tells Owl which dependency to look up and injects that dependency's PR/diff/contract into the coder, reviewer, and fix prompts so the implementation can be checked against the real shipped contract instead of guessed.
+
+### Required shape
+
+```yaml
+depends-on:
+  - repo: <repo-name>
+    plan: <plan-number>
+```
+
+- `repo` — required. Must match one of the configured `OWL_TARGET_REPOS`. The author always specifies the repo; **Owl does not search target repos to guess where a dependency lives**.
+- `plan` — required. The numeric plan prefix. Owl resolves it to a plan file in the dependency repo's queue (`plan/` first, then `plan/done/`), derives the branch name `owl/<plan-filename-without-.md>` from that file, and looks it up only in the declared repo.
+- Multiple entries are allowed; each `- repo: ...` starts a new dependency.
+
+### What Owl does at execution time
+
+For each dependency, in the **declared** repo only:
+
+1. Resolves the plan number to a file in `plan/` or `plan/done/`. If neither exists, the run errors out with a clear message instead of letting the coder guess.
+2. Derives the branch name from the resolved filename, stripping the `_YYYYMMDD_HHMMSS.done` suffix when the file lives under `plan/done/`.
+3. Fetches `origin/<branch>` in the declared repo only and decides:
+   - **Branch available** → injects PR metadata, changed-file list, diff stat, and a bounded diff excerpt into the coder/reviewer/fix prompts under a `## Cross-repo dependency context` heading.
+   - **Branch missing AND plan in `plan/done/`** → injects done-file content and any closed-PR metadata `gh` can find. The dependency is treated as merged into the default branch.
+   - **Branch missing AND plan still in `plan/`** → defers the dependent plan to a later cycle and logs the reason. The plan stays in the queue; it runs as soon as the dependency produces a branch.
+4. The branch lookup is scoped to the declared repo. A branch with the same derived name in a *different* target repo is ignored.
+
+### When to use `depends-on` vs `base-branch`
+
+| Situation | Use |
+|-----------|-----|
+| Plan calls a function/endpoint/symbol that another plan in the *same* repo introduces. | `base-branch` |
+| Plan integrates against a CLI/API/wire contract produced by a plan in *another* repo. | `depends-on` |
+| Both — same-repo follow-up that also depends on a cross-repo contract. | Both fields |
+| Two plans edit the same file in the same repo with no real code dependency. | Neither — let git merge |
+
+### Example
+
+Server plan 199 in `project-api` adds a runtime-config CLI; control plane plan 200 in `project-control` builds a control on top of it:
+
+```yaml
+# plan/200-control-plane-runtime-ops.md
+---
+depends-on:
+  - repo: project-api
+    plan: 199
+---
+```
+
+Effects:
+
+- The coder gets the plan body **plus** a Cross-repo dependency context block describing what plan 199 actually shipped (signatures, response shape, CLI flags). The coder implements against the real contract instead of guessing.
+- The reviewers see the same context block and are told to flag contract mismatches between the new control and the dependency's exports.
+- If plan 199 has not yet produced its branch when plan 200's turn comes around, plan 200 defers and stays in `plan/` until 199 is in flight or done.
+
+### What `depends-on` does NOT do
+
+- It does not change the repo's checkout. The control plane plan still starts from `main` (or its own `base-branch:` if also declared); the dependency context is informational, not a code merge.
+- It does not auto-merge, auto-close, or reorder plans.
+- It does not search every repo for a matching branch. The author must name the repo.
+- It does not require live dependency resolution from the linter; `lint_plan.sh` stays an authoring linter and never inspects another repo's branches.
+- It is not a replacement for `base-branch`. Same-repo code dependencies still use `base-branch`.
+
+### Validation
+
+Run `./src/owl.sh --validate plan/<your-plan>.md` to see exactly what Owl would do with the declared dependencies — parsed entries, whether each declared repo is configured, the plan file each entry resolves to, the derived branch name, and whether that branch is currently visible in the local cache. Validation is read-only (no fetch); a "not visible locally" entry may still resolve at execution time once the worktree fetches origin.
 
 ---
 

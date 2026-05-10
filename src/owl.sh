@@ -861,6 +861,398 @@ parse_plan_base_branch() {
   ' "$plan_file"
 }
 
+# Parse `depends-on:` block from plan frontmatter. Each item is one
+# cross-repo dependency on another plan's contract:
+#
+#   depends-on:
+#     - repo: saudade
+#       plan: 199
+#     - repo: raven
+#       plan: 200
+#
+# Prints one line per dependency in the form `<repo>\t<plan_number>`.
+# Empty output when the plan declares no dependencies. Order matches the
+# author's declaration order. The parser deliberately supports only this
+# block shape, not the broader YAML grammar — the spec calls out flow-style
+# (`{repo: x, plan: 1}`) and inline lists as out of scope.
+parse_plan_dependencies() {
+  local plan_file="$1"
+  awk '
+    function flush() {
+      if (current_repo != "" && current_plan != "") {
+        print current_repo "\t" current_plan
+      }
+      current_repo = ""
+      current_plan = ""
+    }
+
+    function trim_value(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      gsub(/^["'"'"']|["'"'"']$/, "", s)
+      return s
+    }
+
+    NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; next }
+    in_fm && /^---[[:space:]]*$/ { flush(); exit }
+    !in_fm { next }
+
+    {
+      # Top-level `depends-on:` opens the block. Flush any prior pair so we
+      # never accidentally pair fields across two depends-on blocks (the
+      # frontmatter has at most one, but the parser stays defensive).
+      if (match($0, /^depends[-_]on[[:space:]]*:/)) {
+        flush()
+        in_deps = 1
+        next
+      }
+
+      # Any other top-level key (alphabetic at column 0) ends the block.
+      # Flush the in-flight pair first so the last dependency is emitted.
+      if (match($0, /^[A-Za-z_]/)) {
+        if (in_deps) {
+          flush()
+          in_deps = 0
+        }
+        next
+      }
+
+      if (in_deps) {
+        # New list item — `- repo: x` or `- plan: y` (with possible indent).
+        # Emit any previous pair before starting a new one.
+        if (match($0, /^[[:space:]]*-[[:space:]]*/)) {
+          flush()
+          rest = substr($0, RSTART + RLENGTH)
+          if (match(rest, /^repo[[:space:]]*:/)) {
+            current_repo = trim_value(substr(rest, RSTART + RLENGTH))
+          } else if (match(rest, /^plan[[:space:]]*:/)) {
+            current_plan = trim_value(substr(rest, RSTART + RLENGTH))
+          }
+          next
+        }
+        # Continuation of the current item — `  repo: x` / `  plan: y`.
+        if (match($0, /^[[:space:]]+repo[[:space:]]*:/)) {
+          current_repo = trim_value(substr($0, RSTART + RLENGTH))
+          next
+        }
+        if (match($0, /^[[:space:]]+plan[[:space:]]*:/)) {
+          current_plan = trim_value(substr($0, RSTART + RLENGTH))
+          next
+        }
+      }
+    }
+
+    END {
+      if (in_fm && in_deps) flush()
+    }
+  ' "$plan_file"
+}
+
+# Find the plan file matching a numeric prefix in the local plan queue.
+# Searches `plan/` first, then `plan/done/`. Compares numerically so
+# `plan: 199` matches `199-…` even when the queue uses zero-padded names.
+# Prints the absolute path on success and exits non-zero on miss.
+resolve_dependency_plan_file() {
+  local plan_num="$1"
+  if [[ ! "$plan_num" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  local plan_num_int=$((10#$plan_num))
+
+  local d
+  for d in "$PLAN_DIR" "$PLAN_DIR/done"; do
+    [ -d "$d" ] || continue
+    local candidate
+    for candidate in "$d"/*.md; do
+      [ -f "$candidate" ] || continue
+      local name prefix
+      name="$(basename "$candidate")"
+      prefix="$(printf '%s' "$name" | sed -nE 's/^([0-9]+)-.*/\1/p')"
+      [ -n "$prefix" ] || continue
+      local prefix_int=$((10#$prefix))
+      if [ "$prefix_int" -eq "$plan_num_int" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# Derive the Owl branch name for a dependency plan. Branch convention is
+# `owl/<plan-filename-without-.md>`. Done files carry an extra
+# `_YYYYMMDD_HHMMSS.done` suffix that must be stripped first so the derived
+# branch matches the original execution branch (e.g.
+# `199-server-runtime-ops-config_20260509_221344.done.md` →
+# `owl/199-server-runtime-ops-config`).
+derive_dependency_branch() {
+  local plan_file="$1"
+  local name
+  name="$(basename "$plan_file")"
+  if [[ "$name" =~ ^(.+)_[0-9]{8}_[0-9]{6}\.done\.md$ ]]; then
+    printf 'owl/%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf 'owl/%s\n' "${name%.md}"
+  fi
+}
+
+# Append branch-context for a single dependency to the dependency context
+# file. Caller has already verified that the branch is visible on origin.
+# Output is bounded so a giant ancestor diff cannot blow the LLM context.
+gather_dependency_branch_context() {
+  local dep_repo="$1"
+  local dep_plan_num="$2"
+  local dep_plan_file="$3"
+  local dep_branch="$4"
+  local repo_root="$5"
+  local is_done="$6"
+
+  local default_branch
+  default_branch="$(repo_default_branch "$repo_root")"
+
+  local base_ref="refs/remotes/origin/$default_branch"
+  if ! git -C "$repo_root" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+    base_ref="$default_branch"
+  fi
+  local head_ref="refs/remotes/origin/$dep_branch"
+
+  echo ""
+  echo "### Dependency: repo=$dep_repo plan=$dep_plan_num"
+  echo ""
+  echo "- Plan file: $(basename "$dep_plan_file")"
+  echo "- Derived branch: $dep_branch"
+  echo "- Default branch: $default_branch"
+  if [ "$is_done" = "1" ]; then
+    echo "- Status: branch on origin AND plan file in plan/done/ (recently completed)"
+  else
+    echo "- Status: branch available on origin (in flight)"
+  fi
+
+  if command -v gh >/dev/null 2>&1; then
+    local pr_info
+    pr_info=$(cd "$repo_root" && gh pr list --state all --head "$dep_branch" \
+      --json number,title,url,state --limit 1 2>/dev/null) || pr_info=""
+    if [ -n "$pr_info" ] && [ "$pr_info" != "[]" ]; then
+      echo ""
+      echo "#### Pull request"
+      echo ""
+      echo '```json'
+      printf '%s\n' "$pr_info"
+      echo '```'
+    fi
+  fi
+
+  echo ""
+  echo "#### Changed files (bounded to 50)"
+  echo ""
+  echo '```'
+  git -C "$repo_root" diff --name-only "$base_ref"..."$head_ref" 2>/dev/null | head -n 50
+  echo '```'
+
+  echo ""
+  echo "#### Diff stat"
+  echo ""
+  echo '```'
+  git -C "$repo_root" diff --stat "$base_ref"..."$head_ref" 2>/dev/null | head -n 50
+  echo '```'
+
+  echo ""
+  echo "#### Diff excerpt (truncated to 400 lines)"
+  echo ""
+  echo '```diff'
+  git -C "$repo_root" diff "$base_ref"..."$head_ref" 2>/dev/null | head -n 400
+  echo '```'
+}
+
+# Append done-file context for a single dependency. Used when the
+# dependency plan is in plan/done/ and the branch has already been
+# deleted on origin (auto-delete on merge). The done file body is the
+# best on-disk record of what shipped, so we surface a bounded slice of
+# it plus closed-PR metadata if `gh` can find it.
+gather_dependency_done_context() {
+  local dep_repo="$1"
+  local dep_plan_num="$2"
+  local dep_plan_file="$3"
+  local dep_branch="$4"
+  local repo_root="$5"
+
+  echo ""
+  echo "### Dependency: repo=$dep_repo plan=$dep_plan_num"
+  echo ""
+  echo "- Plan file: $(basename "$dep_plan_file")"
+  echo "- Derived branch: $dep_branch"
+  echo "- Status: completed (plan in plan/done/, branch deleted on origin — most likely merged into the default branch)"
+
+  if command -v gh >/dev/null 2>&1; then
+    local pr_info
+    pr_info=$(cd "$repo_root" && gh pr list --state all --head "$dep_branch" \
+      --json number,title,url,state,mergedAt --limit 1 2>/dev/null) || pr_info=""
+    if [ -n "$pr_info" ] && [ "$pr_info" != "[]" ]; then
+      echo ""
+      echo "#### Pull request"
+      echo ""
+      echo '```json'
+      printf '%s\n' "$pr_info"
+      echo '```'
+    fi
+  fi
+
+  echo ""
+  echo "#### Done-file content (truncated to 200 lines)"
+  echo ""
+  echo '```markdown'
+  head -n 200 "$dep_plan_file"
+  echo '```'
+}
+
+# Resolve every cross-repo dependency declared in a plan and write a
+# single context file the coder/reviewer/fix prompts can include.
+#
+# Args:
+#   $1 plan_file        — plan whose `depends-on:` block to resolve
+#   $2 plan_work_dir    — working directory for logging the resolution
+#   $3 context_file     — output path; emptied at start so callers can
+#                         use [ -s ... ] to detect "no deps declared"
+#
+# Return codes (the caller maps these to defer / hard-skip / proceed):
+#   0 — every dependency is ready (or none were declared); context written
+#   1 — at least one dependency is still in `plan/` with no branch yet, so
+#       the dependent plan must defer to a later cycle
+#   2 — at least one dependency cannot be resolved (unknown repo, no plan
+#       file). The context file may be partial; do not run the plan.
+resolve_plan_dependencies() {
+  local plan_file="$1"
+  local plan_work_dir="$2"
+  local context_file="$3"
+
+  : > "$context_file"
+
+  local deps
+  deps="$(parse_plan_dependencies "$plan_file")"
+  if [ -z "$deps" ]; then
+    return 0
+  fi
+
+  {
+    echo "## Cross-repo dependency context"
+    echo ""
+    echo "This plan declared cross-repo dependencies in its frontmatter. Each entry below is another plan in another repo whose contract this plan must integrate against. Treat the diff/file information as load-bearing: implement against the actual signatures, response shapes, and CLI/API contracts shown here, not against assumptions. Reviewers must judge the implementation against both the plan body AND this context — flag mismatches between the dependent plan's code and the contracts produced by the dependencies."
+  } >> "$context_file"
+
+  local dep_count=0
+  local should_defer=false
+  local has_error=false
+
+  while IFS=$'\t' read -r dep_repo dep_plan_num; do
+    [ -n "$dep_repo" ] || continue
+    [ -n "$dep_plan_num" ] || continue
+    dep_count=$((dep_count + 1))
+
+    log "[Dependency $dep_count] declared: repo=$dep_repo plan=$dep_plan_num"
+
+    if [[ ! "$dep_plan_num" =~ ^[0-9]+$ ]]; then
+      log "  ERROR: plan number '$dep_plan_num' is not numeric"
+      {
+        echo ""
+        echo "### Dependency: repo=$dep_repo plan=$dep_plan_num"
+        echo ""
+        echo "- ERROR: plan number is not numeric"
+      } >> "$context_file"
+      has_error=true
+      continue
+    fi
+
+    local repo_configured=false
+    local candidate
+    for candidate in $TARGET_REPOS; do
+      if [ "$candidate" = "$dep_repo" ]; then
+        repo_configured=true
+        break
+      fi
+    done
+    if ! $repo_configured; then
+      log "  ERROR: repo '$dep_repo' is not in OWL_TARGET_REPOS"
+      {
+        echo ""
+        echo "### Dependency: repo=$dep_repo plan=$dep_plan_num"
+        echo ""
+        echo "- ERROR: repo '$dep_repo' is not in OWL_TARGET_REPOS — author must update the plan or the configuration"
+      } >> "$context_file"
+      has_error=true
+      continue
+    fi
+
+    local dep_plan_file
+    dep_plan_file="$(resolve_dependency_plan_file "$dep_plan_num" 2>/dev/null || true)"
+    if [ -z "$dep_plan_file" ]; then
+      log "  ERROR: plan $dep_plan_num not found in plan/ or plan/done/"
+      {
+        echo ""
+        echo "### Dependency: repo=$dep_repo plan=$dep_plan_num"
+        echo ""
+        echo "- ERROR: no plan file with prefix $dep_plan_num in plan/ or plan/done/"
+      } >> "$context_file"
+      has_error=true
+      continue
+    fi
+
+    local dep_branch
+    dep_branch="$(derive_dependency_branch "$dep_plan_file")"
+    local repo_root="$EXECUTION_PROJECT_DIR/$dep_repo"
+    if ! git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      log "  ERROR: repo directory missing or not a git repo: $repo_root"
+      {
+        echo ""
+        echo "### Dependency: repo=$dep_repo plan=$dep_plan_num"
+        echo ""
+        echo "- ERROR: repo directory missing at $repo_root"
+      } >> "$context_file"
+      has_error=true
+      continue
+    fi
+
+    local is_done="0"
+    case "$dep_plan_file" in
+      */done/*) is_done="1" ;;
+    esac
+
+    # Same stale-ref defense as reset_all_repos_to_base: require the
+    # explicit fetch to succeed in addition to rev-parse, so a stale cached
+    # ref left over from a previous run cannot fool us into treating a
+    # deleted branch as live.
+    local branch_available=false
+    if git -C "$repo_root" fetch origin "$dep_branch" 2>/dev/null && \
+       git -C "$repo_root" rev-parse --verify "refs/remotes/origin/$dep_branch" >/dev/null 2>&1; then
+      branch_available=true
+    fi
+
+    if $branch_available; then
+      log "  using branch context: $dep_branch in $dep_repo (is_done=$is_done)"
+      gather_dependency_branch_context \
+        "$dep_repo" "$dep_plan_num" "$dep_plan_file" "$dep_branch" \
+        "$repo_root" "$is_done" >> "$context_file"
+    elif [ "$is_done" = "1" ]; then
+      log "  using done-file context: $dep_branch in $dep_repo (branch deleted on origin)"
+      gather_dependency_done_context \
+        "$dep_repo" "$dep_plan_num" "$dep_plan_file" "$dep_branch" \
+        "$repo_root" >> "$context_file"
+    else
+      log "  DEFER: dependency plan $dep_plan_num is queued but has not produced branch '$dep_branch' in $dep_repo yet"
+      should_defer=true
+    fi
+  done < <(printf '%s\n' "$deps")
+
+  log "Resolved $dep_count cross-repo dependency declaration(s); context: $context_file"
+
+  if $has_error; then
+    return 2
+  fi
+  if $should_defer; then
+    return 1
+  fi
+  return 0
+}
+
 run_llm() {
   local provider
   provider="$(normalize_provider "$1")"
@@ -1353,6 +1745,26 @@ execute_plan() {
     log "Using Claude coder session: $coder_session_id"
   fi
 
+  # ── Step 2a: Resolve cross-repo plan dependencies ──
+  # Done before worktree setup so a deferral does not waste worktree work.
+  # The resolver inspects $EXECUTION_PROJECT_DIR/<dep_repo>, which still
+  # equals $PROJECT_DIR/<dep_repo> at this point — read-only fetch +
+  # rev-parse only, no working-tree changes.
+  local dep_context_file="$plan_work_dir/dependency_context.txt"
+  local dep_rc=0
+  resolve_plan_dependencies "$plan_file" "$plan_work_dir" "$dep_context_file" || dep_rc=$?
+  case "$dep_rc" in
+    0) : ;;
+    1)
+      log "Cross-repo dependency not ready — deferring plan '$plan_name' to a later cycle."
+      return 0
+      ;;
+    2)
+      log "Cross-repo dependency error for plan '$plan_name' — see ERROR lines above. Skipping."
+      return 0
+      ;;
+  esac
+
   # ── Step 2: Create/reuse deterministic worktrees, then reset them to the base ──
   if ! ensure_plan_workspace "$plan_slug" "$plan_work_dir"; then
     log "Plan execution aborted before $IMPL_PROVIDER: failed to prepare worktrees."
@@ -1375,13 +1787,17 @@ execute_plan() {
   cd "$EXECUTION_PROJECT_DIR"
 
   local plan_prompt_file="$plan_work_dir/plan_prompt.txt"
-  cat > "$plan_prompt_file" <<PLANEOF
-$plan_content
-
-IMPORTANT INSTRUCTIONS:
-- Do NOT commit, push, or create branches. Just write the code changes.
-- The agent handles all git operations.
-PLANEOF
+  {
+    printf '%s\n' "$plan_content"
+    if [ -s "$dep_context_file" ]; then
+      echo ""
+      cat "$dep_context_file"
+    fi
+    echo ""
+    echo "IMPORTANT INSTRUCTIONS:"
+    echo "- Do NOT commit, push, or create branches. Just write the code changes."
+    echo "- The agent handles all git operations."
+  } > "$plan_prompt_file"
 
   local coder_ack_file="$plan_work_dir/coder.ack"
   local coder_prompt_wrapped="$plan_work_dir/plan_prompt_wrapped.txt"
@@ -1665,8 +2081,9 @@ run_review_loop() {
     # The plan is included so the reviewer can check the diff against the author's
     # intent instead of flagging deliberate changes as regressions.
     local review_prompt_file="$plan_work_dir/review_prompt_$i.txt"
+    local dep_context_file="$plan_work_dir/dependency_context.txt"
     {
-      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Judge the diff against the plan below — if a change looks surprising but matches what the plan explicitly asked for, that is NOT a bug and must not be flagged. Only flag things that are wrong relative to the plan or introduce genuine defects (security, correctness, crashes, obviously broken logic). In particular, make sure that this change does not cause regression of other features or functionalities of the solution — check call sites of any modified function, removed/renamed exports, changed signatures or shared types, edited shared styles/components, and any feature that consumes the touched files. Flag a concrete regression risk when you find one. Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
+      echo "You are a code reviewer. Review the changes in the commits listed below for bugs, security issues, code quality problems, and correctness. Judge the diff against the plan below — if a change looks surprising but matches what the plan explicitly asked for, that is NOT a bug and must not be flagged. Only flag things that are wrong relative to the plan or introduce genuine defects (security, correctness, crashes, obviously broken logic). In particular, make sure that this change does not cause regression of other features or functionalities of the solution — check call sites of any modified function, removed/renamed exports, changed signatures or shared types, edited shared styles/components, and any feature that consumes the touched files. Flag a concrete regression risk when you find one. If a Cross-repo dependency context block is present below, the implementation MUST integrate against the contract that block describes; flag any place where the diff assumes a contract that does not match (wrong response shape, wrong CLI arguments, wrong types). Be concise — return only actionable fixes, no praise. If nothing needs fixing, respond with exactly: LGTM"
       echo ""
       echo "## Plan being implemented"
       echo ""
@@ -1674,6 +2091,10 @@ run_review_loop() {
         echo "$plan_content"
       else
         echo "(plan file unavailable)"
+      fi
+      if [ -s "$dep_context_file" ]; then
+        echo ""
+        cat "$dep_context_file"
       fi
       echo ""
       echo "## Commits to review"
@@ -1854,6 +2275,13 @@ $(cat "$tests_summary_file")"
     log "[Iteration $i/$review_iterations] Fix phase"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
+    # Preserve identical whitespace to the pre-deps heredoc when no deps
+    # are declared: empty expansion of `$dep_context_extras` collapses to
+    # the same blank-line cadence as the original prompt.
+    local dep_context_extras=""
+    if [ -s "$dep_context_file" ]; then
+      dep_context_extras=$(printf '\n%s\n' "$(cat "$dep_context_file")")
+    fi
     cat > "$fix_prompt_file" <<FIXEOF
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
@@ -1869,12 +2297,14 @@ The plan below describes the intended behavior and is the default source of trut
    If the contradiction is a style preference, a hedged question, a refactor suggestion, or anything short of a concrete defect, follow the plan. For hedged questions ("if X is intentional, document it; if not, revert") where the plan confirms X is intentional, prefer a short comment or docstring over reverting.
 3. When in doubt, the plan wins. Deviation is reserved for cases where the reviewer catches a real bug the plan got wrong, not for taste-level disagreement.
 
+If a Cross-repo dependency context block is present below, the fix MUST stay consistent with the contract that block describes (function signatures, response shapes, CLI arguments, types). When a reviewer's comment is about a contract mismatch with that context, treat it as a real defect and apply the fix.
+
 IMPORTANT: Do NOT commit, push, or create branches. Just write the code fixes.
 
 ## Plan being implemented
 
 ${plan_content:-(plan file unavailable)}
-
+${dep_context_extras}
 ## Review Feedback
 
 $combined_review
@@ -2159,6 +2589,67 @@ validate_plan() {
 
   if [ "$found_repos" -eq 0 ]; then
     echo "  (none found -- check OWL_TARGET_REPOS)"
+  fi
+  echo ""
+
+  # 6. Cross-repo dependencies. Validation is read-only: we never fetch.
+  # Anything reported as "not visible locally" may still resolve at execution
+  # time once the worktree fetches origin.
+  local deps
+  deps="$(parse_plan_dependencies "$plan_file")"
+  echo "Cross-repo dependencies:"
+  if [ -z "$deps" ]; then
+    echo "  (none declared)"
+  else
+    while IFS=$'\t' read -r dep_repo dep_plan_num; do
+      [ -n "$dep_repo" ] || continue
+      [ -n "$dep_plan_num" ] || continue
+      echo "  - repo: $dep_repo, plan: $dep_plan_num"
+
+      if [[ ! "$dep_plan_num" =~ ^[0-9]+$ ]]; then
+        echo "      ERROR: plan number is not numeric"
+        continue
+      fi
+
+      local repo_configured=false candidate
+      for candidate in $TARGET_REPOS; do
+        if [ "$candidate" = "$dep_repo" ]; then
+          repo_configured=true
+          break
+        fi
+      done
+      if ! $repo_configured; then
+        echo "      ERROR: repo '$dep_repo' not in OWL_TARGET_REPOS"
+        continue
+      fi
+      echo "      repo configured: yes"
+
+      local dep_plan_file
+      dep_plan_file="$(resolve_dependency_plan_file "$dep_plan_num" 2>/dev/null || true)"
+      if [ -z "$dep_plan_file" ]; then
+        echo "      ERROR: no plan file with prefix $dep_plan_num in plan/ or plan/done/"
+        continue
+      fi
+      local rel_plan
+      case "$dep_plan_file" in
+        */done/*) rel_plan="plan/done/$(basename "$dep_plan_file")" ;;
+        *)        rel_plan="plan/$(basename "$dep_plan_file")" ;;
+      esac
+      echo "      plan file: $rel_plan"
+
+      local dep_branch
+      dep_branch="$(derive_dependency_branch "$dep_plan_file")"
+      echo "      derived branch: $dep_branch"
+
+      local dep_repo_root="$PROJECT_DIR/$dep_repo"
+      if git -C "$dep_repo_root" rev-parse --verify "refs/remotes/origin/$dep_branch" >/dev/null 2>&1; then
+        echo "      origin branch: visible locally (would use branch context)"
+      elif [[ "$dep_plan_file" == */done/* ]]; then
+        echo "      origin branch: not visible locally; plan is done — would use done-file context"
+      else
+        echo "      origin branch: not visible locally; would defer at execution time until the dependency produces a branch"
+      fi
+    done < <(printf '%s\n' "$deps")
   fi
   echo ""
 
