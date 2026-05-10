@@ -624,6 +624,81 @@ EOF
   return 0
 }
 
+# ---- execute_plan exit-code contract -------------------------------------
+
+# Hard dep errors must surface as non-zero so --run-plan exits with failure
+# and the queue loop's `if ! execute_plan` check fires. Prior behavior
+# returned 0 here, which silently skipped bad plans every cycle.
+case_execute_plan_returns_nonzero_on_dep_error() {
+  local plan_name="290-bad-dep-execute"
+  local plan_file="$PLAN_DIR/$plan_name.md"
+  cat > "$plan_file" <<'EOF'
+---
+depends-on:
+  - repo: not-a-target-repo
+    plan: 100
+---
+# Plan that should not run
+
+No plan-number references in code.
+EOF
+
+  # OWL_IMPL_PROVIDER=none was set globally for this test file, so the
+  # coder run_llm short-circuits — but the dep error is detected before
+  # any LLM is called, so execute_plan should return well before that.
+  local rc=0
+  execute_plan "$plan_file" || rc=$?
+  assert_eq 1 "$rc" "execute_plan returns non-zero on hard dep error" || return 1
+  assert_grep "ERROR: cross-repo dependency declaration is invalid" "$LOG_FILE" "log explains the failure" || return 1
+  # Plan file is a hard-error case; it must remain in plan/ so the
+  # operator can fix it (no done-file write, no deletion).
+  assert_file_exists "$plan_file" "plan file is preserved on hard dep error" || return 1
+  rm -f "$plan_file"
+  return 0
+}
+
+case_execute_plan_returns_zero_on_defer() {
+  # Counterpart guardrail: defer (rc=1 from resolver) must NOT surface
+  # as a failure; the queue loop has to keep draining other plans.
+  local plan_name="291-defer-execute"
+  local plan_file="$PLAN_DIR/$plan_name.md"
+  cat > "$plan_file" <<'EOF'
+---
+depends-on:
+  - repo: repo-a
+    plan: 100
+---
+# Plan that should defer
+
+No plan-number references in code.
+EOF
+
+  # Plan 100 is in PLAN_DIR but its branch was earlier pushed only to
+  # repo-b in the wrong-repo-isolation test; later case_resolver_branch_*
+  # pushed it to repo-a. Push to a brand-new branch we can guarantee
+  # does NOT exist on repo-a. Use the actual derived branch from this
+  # plan number, which will be `owl/100-base-feature`.
+  #
+  # Since other tests above may have populated repo-a/origin with that
+  # branch, prune it locally so this case observes a clean defer.
+  git -C "$FAKE_PROJECT_DIR/repo-a" update-ref -d \
+    "refs/remotes/origin/owl/100-base-feature" 2>/dev/null || true
+  # Also delete from the bare origin so the fetch attempt genuinely fails.
+  local del_sandbox="$TMPDIR/defer-cleanup"
+  rm -rf "$del_sandbox"
+  git clone -q "$REPO_A_BARE" "$del_sandbox" 2>/dev/null
+  git -C "$del_sandbox" push -q origin --delete "owl/100-base-feature" 2>/dev/null || true
+  rm -rf "$del_sandbox"
+
+  local rc=0
+  execute_plan "$plan_file" || rc=$?
+  assert_eq 0 "$rc" "execute_plan returns 0 on defer (continue draining)" || return 1
+  assert_grep "Cross-repo dependency not ready — deferring" "$LOG_FILE" "log records the defer" || return 1
+  assert_file_exists "$plan_file" "plan file is preserved across a defer" || return 1
+  rm -f "$plan_file"
+  return 0
+}
+
 echo "test_cross_repo_plan_dependencies:"
 run_case "parser: no deps → empty output" case_parser_no_deps
 run_case "parser: single dep parsed" case_parser_single_dep
@@ -650,6 +725,8 @@ run_case "resolve: missing repo field → rc=2" case_resolver_missing_repo_field
 run_case "validate fails on missing field" case_validate_fails_on_missing_field
 run_case "validate fails when dep repo unknown (and reports it)" case_validate_reports_dependencies_and_fails_on_errors
 run_case "validate passes when all deps resolve" case_validate_passes_when_all_deps_resolve
+run_case "execute_plan returns non-zero on hard dep error" case_execute_plan_returns_nonzero_on_dep_error
+run_case "execute_plan returns 0 on defer" case_execute_plan_returns_zero_on_defer
 
 if [ "$failures" -ne 0 ]; then
   echo "test_cross_repo_plan_dependencies: $failures FAILED"

@@ -1796,12 +1796,22 @@ execute_plan() {
   case "$dep_rc" in
     0) : ;;
     1)
+      # Defer is not an error — the dependency is real but not yet
+      # ready. Return 0 so the queue loop continues to the next plan
+      # this cycle and re-tries this plan next cycle.
       log "Cross-repo dependency not ready — deferring plan '$plan_name' to a later cycle."
       return 0
       ;;
     2)
-      log "Cross-repo dependency error for plan '$plan_name' — see ERROR lines above. Skipping."
-      return 0
+      # Hard validation/error: unknown repo, missing dep plan file,
+      # missing required field. The plan calls these "validation/error"
+      # cases — they will not self-heal on retry, the author has to fix
+      # the depends-on block. Return non-zero so --run-plan exits with
+      # a failure code AND the queue loop logs "Plan failed" and stops
+      # the cycle, surfacing the bad plan to the operator instead of
+      # silently skipping it forever.
+      log "ERROR: cross-repo dependency declaration is invalid for plan '$plan_name' (see ERROR lines above). The plan cannot run until the author fixes the depends-on block; surfacing failure so the operator notices."
+      return 1
       ;;
   esac
 
