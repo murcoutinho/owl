@@ -247,6 +247,19 @@ Required wording to include verbatim:
 > upholds) instead. The plan number belongs in the PR description and
 > commit metadata only.
 
+This section MUST also include a no-redundant-defense rule. If a
+precondition is enforced at layer N (DB constraint, pydantic, type
+signature), do not add a guard at layer N+1 unless the plan names a
+concrete path that reaches it with the precondition violated.
+"Defensive backstop" and "mixed-version deploys" are vibes, not paths.
+
+Required wording to include or adapt:
+
+> No redundant defensive layers. Add a guard at layer N+1 only if this
+> plan names a concrete code path that bypasses the enforcement at
+> layer N. Otherwise the guard is dead code and its test has to
+> manufacture an impossible state to exercise it.
+
 ### 6. Files to modify
 Flat list of every file path touched by this plan, all under the single repo named in Section 2. (If you find yourself listing files from two repos, stop and split the plan per Step 7.) Group by layer where helpful (e.g. `api/`, `tests/`).
 
