@@ -69,11 +69,21 @@ Note: Owl's actual reviewer count is controlled by local config, not by the plan
 
 `base-branch` is the only way to tell Owl "this plan depends on code that another queued/in-flight plan introduces." Getting it right matters — the wrong value silently corrupts the dependent plan's starting state.
 
+### Pre-write check: scan the open queue
+
+Before deciding on `base-branch`, list **every file in `owl/plan/`** (ignore `owl/plan/done/` — those plans already merged into `main`). For each open plan, ask:
+
+1. Does it rename, remove, or change the shape of a type, schema, function signature, env var, or config field this plan reads? → **chain.**
+2. Does it rewrite the same function body, the same JSX/render block, the same SQL statement, or the same config object this plan rewrites? → **chain.** "Same function" is a much stronger conflict signal than "same file."
+3. Does it introduce a symbol/file/env var this plan needs to import or reference? → **chain.**
+
+If any answer is yes, set `base-branch:` on the immediate predecessor per the transitive-chain rule below. When unsure between two plausible chain orders, surface the trade-off to the user before writing the plan rather than asserting independence in the plan body.
+
 ### When to use it (and when NOT to)
 
-Use `base-branch` **only** when this plan has a **true code dependency** on another queued or in-flight plan — a symbol it needs to import, a file that must exist, a type it references, a config change another plan ships. If the dependent plan would fail to compile/run without the ancestor plan's code, that is a true dependency and deserves `base-branch`.
+Use `base-branch` **only** when this plan has a **true code dependency** on another queued or in-flight plan — a symbol it needs to import, a file that must exist, a type it references, a config change another plan ships. If the dependent plan would fail to compile/run (or would predictably conflict on the same function/type) without the ancestor plan's code, that is a true dependency and deserves `base-branch`.
 
-Do NOT use `base-branch` just because two plans edit the same file. Non-overlapping edits to the same file merge cleanly via normal git; adding a chain there only creates rigidity. Reserve chains for genuine code dependencies.
+Do NOT use `base-branch` just because two plans edit the same file in **unrelated regions** (different functions, different config sections, different routes). Non-overlapping edits merge cleanly via git. But two plans that both rewrite the same function body, or both modify the same type/schema, ARE a code dependency — chain them.
 
 ### Follow-up plans to open PRs
 
@@ -145,8 +155,16 @@ One subtlety: Owl treats "branch not on origin right now" as the fallback trigge
    fixes, or must preserve an unmerged PR, stack on that PR's head branch even
    if it is not an Owl branch.
 5. **Using `base-branch` for every same-file edit.** Only for true code
-   dependencies or open-PR follow-ups; independent same-file edits do not need a
-   chain.
+   dependencies or open-PR follow-ups; independent same-file edits in
+   unrelated regions do not need a chain.
+6. **Treating a wire-shape change as a non-dependency.** A plan that renames
+   a type field, changes a schema, or alters a function signature is
+   load-bearing for every other queued plan that reads that shape. Always
+   chain those, even if the dependent plan would technically still compile
+   against the old shape — the conflict on merge is guaranteed.
+7. **Skipping the pre-write queue scan.** The check above is mandatory before
+   writing any plan, not an optional sanity step. Missing a dependency here
+   produces predictable merge conflicts at execution time.
 
 ---
 
