@@ -780,6 +780,195 @@ normalize_all_plan_repos() {
   ! $had_error
 }
 
+# ─── Fixer-failure recovery ───
+# These helpers support the "fixer ran but left the worktree dirty/uncommittable"
+# recovery path. They are NOT used for the separate "fix LLM crashed/rate-limited"
+# bail-out, which has its own handling (had_unrecoverable_llm_failure).
+
+# Number of failed fix attempts before a plan is quarantined.
+FIX_FAILURE_CAP=${FIX_FAILURE_CAP:-3}
+
+# Read the per-plan failed-fix-attempt counter. Prints 0 when absent/invalid.
+read_fix_attempts() {
+  local plan_work_dir="$1"
+  local n=0
+  if [ -f "$plan_work_dir/fix_attempts" ]; then
+    n=$(tr -cd '0-9' < "$plan_work_dir/fix_attempts" 2>/dev/null)
+  fi
+  printf '%s\n' "${n:-0}"
+}
+
+# Increment the per-plan failed-fix-attempt counter and print the new value.
+bump_fix_attempts() {
+  local plan_work_dir="$1"
+  local n
+  n=$(read_fix_attempts "$plan_work_dir")
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$plan_work_dir/fix_attempts"
+  printf '%s\n' "$n"
+}
+
+# Snapshot the dirty worktree of every target repo into one combined patch file
+# plus a list of untracked files, so a later resume can tell the fixer exactly
+# what it left behind. The dirty changes are LEFT IN PLACE — this only reads.
+# Prints a human-readable list of dirty files (newline-separated, "repo: path").
+capture_dirty_snapshot() {
+  local plan_work_dir="$1"
+  local attempt="$2"
+  local snapshot_file="$plan_work_dir/dirty_snapshot_${attempt}.patch"
+  : > "$snapshot_file"
+  local dirty_files=""
+  while IFS= read -r -d '' repo_root; do
+    local repo_name
+    repo_name="$(basename "$repo_root")"
+    repo_has_local_changes "$repo_root" || continue
+    {
+      echo "### repo: $repo_name ($repo_root)"
+      echo "## tracked changes (git diff HEAD):"
+      git -C "$repo_root" diff HEAD 2>/dev/null || git -C "$repo_root" diff 2>/dev/null || true
+      echo ""
+      echo "## untracked files:"
+      git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null || true
+      echo ""
+    } >> "$snapshot_file"
+
+    # Tracked + staged modified paths.
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      dirty_files+="$repo_name: $path"$'\n'
+    done < <(git -C "$repo_root" diff --name-only HEAD 2>/dev/null || git -C "$repo_root" diff --name-only 2>/dev/null || true)
+    # Untracked paths.
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      dirty_files+="$repo_name: $path (untracked)"$'\n'
+    done < <(git -C "$repo_root" ls-files --others --exclude-standard 2>/dev/null || true)
+  done < <(find_target_repos)
+  printf '%s' "$dirty_files"
+}
+
+# Build a RESUME prompt for the fixer after a prior attempt left the worktree
+# dirty/uncommittable. The prompt MUST explain *why* the prior attempt failed
+# (captured reason / git error) so the fixer can react, not just retry blind.
+build_resume_fix_prompt() {
+  local plan_work_dir="$1"
+  local resume_prompt_file="$2"
+  local prior_reason="$3"
+  local dirty_files="$4"
+  local prior_attempt="$5"
+  local snapshot_file="$plan_work_dir/dirty_snapshot_${prior_attempt}.patch"
+
+  {
+    echo "RESUME — a previous automated fix attempt did not finish cleanly."
+    echo ""
+    echo "On the previous cycle you (the fix agent) changed files in this project"
+    echo "but the orchestrator could NOT commit your work, so it was left in the"
+    echo "current dirty worktree. Your job now is to FINISH or fully UNDO that work."
+    echo ""
+    echo "## Why the previous attempt failed"
+    echo ""
+    echo "${prior_reason:-(reason not captured)}"
+    echo ""
+    echo "## Files you left dirty in the worktree"
+    echo ""
+    if [ -n "$dirty_files" ]; then
+      printf '%s\n' "$dirty_files"
+    else
+      echo "(no dirty files detected — the worktree may have been cleaned already)"
+    fi
+    echo ""
+    if [ -s "$snapshot_file" ]; then
+      echo "A snapshot of those changes was saved to:"
+      echo "  $snapshot_file"
+      echo "Inspect the current worktree directly with 'git status' and 'git diff'."
+      echo ""
+    fi
+    echo "## What to do now"
+    echo ""
+    echo "Continue from the CURRENT dirty worktree — do not start over and do not"
+    echo "discard unrelated work. You must do exactly ONE of the following:"
+    echo ""
+    echo "1. FINISH the fix: complete the changes so the code is correct and the"
+    echo "   deterministic tests pass. Resolve whatever caused the failure above"
+    echo "   (e.g. syntax error, conflict, leftover merge markers, broken file)."
+    echo "2. REVERT your own partial changes: if the fix cannot be completed"
+    echo "   cleanly, explicitly undo the partial changes you introduced so the"
+    echo "   worktree returns to a coherent state."
+    echo ""
+    echo "Do NOT commit, push, or create branches — the orchestrator commits."
+    echo "Leave the worktree in a state that is either correct-and-complete or"
+    echo "cleanly-reverted; do not leave it half-edited."
+    echo ""
+    echo "## Original review feedback that prompted the fix"
+    echo ""
+    if [ -f "$plan_work_dir/.resume_fix_feedback" ]; then
+      cat "$plan_work_dir/.resume_fix_feedback"
+    else
+      echo "(original review feedback unavailable — rely on the failure reason above)"
+    fi
+  } > "$resume_prompt_file"
+}
+
+# Quarantine a plan that has failed the fix phase FIX_FAILURE_CAP times.
+# Moves the plan .md aside into $PLAN_DIR/quarantine/ (mirroring $PLAN_DIR/done/)
+# so check_plans() never re-picks it as a fresh plan, removes the pending marker
+# so resume_pending_reviews() skips it, and detaches worktrees to main. The
+# quarantine cycle CONTINUES — the caller returns 0 so the queue keeps draining.
+quarantine_plan() {
+  local plan_file="$1"
+  local plan_name="$2"
+  local plan_work_dir="$3"
+  local reason="$4"
+  local attempts="$5"
+
+  mkdir -p "$PLAN_DIR/quarantine"
+  local quarantine_name
+  quarantine_name="${plan_name%.md}_$(date '+%Y%m%d_%H%M%S').quarantined.md"
+  local quarantine_path="$PLAN_DIR/quarantine/$quarantine_name"
+
+  {
+    echo "# QUARANTINED by Owl"
+    echo "#"
+    echo "# This plan failed the fix phase $attempts time(s) (cap $FIX_FAILURE_CAP)"
+    echo "# and was quarantined so it would not block the queue."
+    echo "#"
+    echo "# reason: $reason"
+    echo "# quarantined_at: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "# original_plan_file: $plan_file"
+    echo "# work_dir: $plan_work_dir"
+    echo "#"
+    echo "# To requeue: fix the underlying problem, strip these comment lines,"
+    echo "# and move the file back into $PLAN_DIR/."
+    echo "#"
+    if [ -f "$plan_file" ]; then
+      echo ""
+      cat "$plan_file"
+    fi
+  } > "$quarantine_path"
+
+  # Remove the original plan from the queue so check_plans() does not re-pick it.
+  rm -f "$plan_file"
+  # Remove the pending marker so resume_pending_reviews() skips it.
+  rm -f "$plan_work_dir/pending"
+
+  {
+    echo "plan_name=$plan_name"
+    echo "plan_file=$plan_file"
+    echo "status=quarantined"
+    echo "reason=$reason"
+    echo "fix_attempts=$attempts"
+    echo "quarantine_file=$quarantine_path"
+    echo "quarantined_at=$(date '+%Y-%m-%d %H:%M:%S')"
+  } > "$plan_work_dir/quarantined"
+
+  log "========================================="
+  log "Plan '$plan_name' QUARANTINED after $attempts failed fix attempt(s)."
+  log "  reason:          $reason"
+  log "  moved to:        $quarantine_path"
+  log "  pending marker removed — the queue will continue to the next plan."
+  log "========================================="
+  switch_all_to_main
+}
+
 # Print the plan file with YAML frontmatter (--- ... ---) stripped.
 strip_plan_frontmatter() {
   local plan_file="$1"
@@ -1526,6 +1715,9 @@ write_done_file() {
   rm -f "$plan_work_dir/pending"
   rm -f "$plan_work_dir/state"
   rm -f "$plan_work_dir/review_iterations"
+  rm -f "$plan_work_dir/fix_attempts"
+  rm -f "$plan_work_dir/dirty_after_fix_failure"
+  rm -f "$plan_work_dir/.resume_fix_feedback"
   log "Wrote done file: $done_name"
 }
 
@@ -1611,7 +1803,12 @@ run_review_loop() {
         log "[Resume] $repo_name: HEAD=${actual_head:-<unknown>} does not match recorded manifest head=$expected_head"
         drift_detected=true
       fi
-    done < "$resume_manifest"
+    # A per-round manifest accumulates one line per commit: a fix round cp's
+    # the previous round's manifest and then appends its own commit hash, so a
+    # repo can appear on several lines. Only the LAST line per repo is the
+    # current expected head — earlier lines are stale and would always look
+    # "drifted". Check the last line per repo, not every historical line.
+    done < <(awk -F'\t' 'NF>=4 && $2!="" {seen[$2]=$0} END {for (k in seen) print seen[k]}' "$resume_manifest")
     if $drift_detected; then
       log "Branch state drifted from recorded manifest. Leaving pending — investigate manually before the next cycle."
       {
@@ -1686,7 +1883,9 @@ run_review_loop() {
         else
           echo "- Repo: $repo_name (path: $repo_root) — run: git -C $repo_root show $head"
         fi
-      done < "$manifest"
+      # Last line per repo only — see the resume drift-check above for why a
+      # per-round manifest can carry stale duplicate repo lines.
+      done < <(awk -F'\t' 'NF>=4 && $2!="" {seen[$2]=$0} END {for (k in seen) print seen[k]}' "$manifest")
     } > "$review_prompt_file"
 
     # Launch reviewers
@@ -1854,7 +2053,36 @@ $(cat "$tests_summary_file")"
     log "[Iteration $i/$review_iterations] Fix phase"
 
     local fix_prompt_file="$plan_work_dir/fix_prompt_$i.txt"
-    cat > "$fix_prompt_file" <<FIXEOF
+
+    # Resume mode: a prior cycle ran the fixer but normalize_all_plan_repos
+    # could not commit its work, leaving the worktree dirty. The marker file
+    # below survives resume_pending_reviews() clearing pending_status. When
+    # present, send the fixer a RESUME prompt (continue from the dirty
+    # worktree, finish or revert) instead of re-running the fix from scratch.
+    local resume_fix=false
+    if [ -f "$plan_work_dir/dirty_after_fix_failure" ]; then
+      resume_fix=true
+    fi
+
+    if $resume_fix; then
+      local prior_reason="" prior_attempt=0
+      prior_reason=$(sed -n 's/^reason=//p' "$plan_work_dir/dirty_after_fix_failure" 2>/dev/null | head -n 1)
+      prior_attempt=$(sed -n 's/^attempt=//p' "$plan_work_dir/dirty_after_fix_failure" 2>/dev/null | head -n 1)
+      prior_attempt=${prior_attempt:-0}
+      # Stash the original review feedback so the resume prompt can still show
+      # the fixer what it was asked to fix in the first place.
+      printf '%s\n' "$combined_review" > "$plan_work_dir/.resume_fix_feedback"
+      local resume_dirty_files=""
+      resume_dirty_files=$(capture_dirty_snapshot "$plan_work_dir" "resume_$i")
+      log "Fix phase resuming from a prior dirty-after-fix failure (attempt $prior_attempt)."
+      build_resume_fix_prompt \
+        "$plan_work_dir" \
+        "$fix_prompt_file" \
+        "$prior_reason" \
+        "$resume_dirty_files" \
+        "$prior_attempt"
+    else
+      cat > "$fix_prompt_file" <<FIXEOF
 You received the following code review feedback on recent changes in this project. Apply the necessary fixes. Only change what the review asks for — do not refactor unrelated code.
 
 How to handle conflicts between the plan and the reviewers:
@@ -1879,6 +2107,7 @@ ${plan_content:-(plan file unavailable)}
 
 $combined_review
 FIXEOF
+    fi
 
     log "Applying fixes via $FIX_PROVIDER ($FIX_MODEL)..."
     local fix_rc=0
@@ -1910,16 +2139,96 @@ FIXEOF
 
     local next_manifest="$plan_work_dir/review_input_$((i + 1)).tsv"
     cp "$manifest" "$next_manifest" 2>/dev/null || : > "$next_manifest"
-    if ! normalize_all_plan_repos \
+    local manifest_before_lines=0
+    [ -f "$next_manifest" ] && manifest_before_lines=$(wc -l < "$next_manifest" 2>/dev/null | tr -d ' ')
+    manifest_before_lines=${manifest_before_lines:-0}
+
+    local normalize_ok=true
+    normalize_all_plan_repos \
       "$branch_name" \
       "[owl] ${plan_name%.md} — review fix iteration $i" \
       "$plan_work_dir" \
       "$next_manifest" \
-      "reuse"; then
-      log "Fix phase left repos in a dirty or uncommittable state. Will retry next cycle."
-      switch_all_to_main
+      "reuse" || normalize_ok=false
+
+    # Did the fixer's work actually land as a new commit this round?
+    local manifest_after_lines=0
+    [ -f "$next_manifest" ] && manifest_after_lines=$(wc -l < "$next_manifest" 2>/dev/null | tr -d ' ')
+    manifest_after_lines=${manifest_after_lines:-0}
+    local committed_a_fix=false
+    [ "$manifest_after_lines" -gt "$manifest_before_lines" ] && committed_a_fix=true
+
+    # Recovery path: the fixer ran (LLM exited 0) but its changes did not
+    # commit cleanly. Two sub-cases both count as a FAILED fix attempt:
+    #   (a) normalize_all_plan_repos failed → worktree left dirty/uncommittable.
+    #   (b) it succeeded but no new commit was produced while we were resuming
+    #       a prior dirty failure → the fixer cleanly reverted its own work
+    #       (constraint: a clean revert still counts toward the cap).
+    if ! $normalize_ok || { $resume_fix && ! $committed_a_fix; }; then
+      local fix_failure_reason=""
+      if ! $normalize_ok; then
+        fix_failure_reason="dirty_after_fix_failure: fixer ran for iteration $i but normalize_all_plan_repos could not commit — worktree left dirty or uncommittable (see ERROR lines and 'git status' above)"
+      else
+        fix_failure_reason="dirty_after_fix_failure: resume attempt for iteration $i produced no commit — the fixer cleanly reverted its own partial changes instead of finishing the fix"
+      fi
+
+      local fix_attempts
+      fix_attempts=$(bump_fix_attempts "$plan_work_dir")
+      log "Fix phase failed to land a commit (attempt $fix_attempts of $FIX_FAILURE_CAP): $fix_failure_reason"
+
+      # Snapshot whatever the fixer left in the worktree (a no-op if (b)).
+      local dirty_files=""
+      dirty_files=$(capture_dirty_snapshot "$plan_work_dir" "$fix_attempts")
+
+      if [ "$fix_attempts" -ge "$FIX_FAILURE_CAP" ]; then
+        # Hard cap reached → quarantine. The queue must keep going, so return
+        # 0: check_plans()/resume_pending_reviews() treat that as "not stuck".
+        rm -f "$plan_work_dir/dirty_after_fix_failure"
+        quarantine_plan "$plan_file" "$plan_name" "$plan_work_dir" \
+          "$fix_failure_reason" "$fix_attempts"
+        return 0
+      fi
+
+      # Under the cap → preserve the dirty worktree and arm the resume path.
+      # The marker file survives resume_pending_reviews() clearing
+      # pending_status; next cycle the fix phase reads it and sends a RESUME
+      # prompt that explains exactly why this attempt failed.
+      {
+        echo "attempt=$fix_attempts"
+        echo "iteration=$i"
+        echo "reason=$fix_failure_reason"
+        echo "recorded_at=$(date '+%Y-%m-%d %H:%M:%S')"
+      } > "$plan_work_dir/dirty_after_fix_failure"
+
+      {
+        echo "plan_name=$plan_name"
+        echo "plan_file=$plan_file"
+        echo "branch_name=$branch_name"
+        echo "failed_iteration=$i"
+        echo "total_iterations=$review_iterations"
+        echo "reviews_done=$review_rounds_completed"
+        echo "fix_attempts=$fix_attempts"
+        echo "reason=$fix_failure_reason"
+        echo "aborted_at=$(date '+%Y-%m-%d %H:%M:%S')"
+      } > "$plan_work_dir/pending_status"
+
+      log "Fix phase left repos dirty. Worktree changes PRESERVED for resume; next cycle will send the fixer a resume prompt. Pending marker kept."
+      # Intentionally NOT calling switch_all_to_main here. The whole point of
+      # this path is to keep the fixer's dirty changes on the plan branch's
+      # worktree so the next cycle can resume from them. switch_all_to_main
+      # runs 'git checkout --detach <default>', which would either fail (on
+      # conflicting paths) or carry the dirty changes off the plan branch —
+      # both lose the resume state. The worktrees stay on the plan branch;
+      # run_review_loop's own re-checkout at resume is a no-op on a dirty
+      # same-branch checkout, so the changes survive. No commit was made, so
+      # HEAD has not moved and the resume drift-check still passes.
       return 1
     fi
+
+    # The fixer succeeded and a commit landed (or there was simply nothing to
+    # commit on a non-resume round). Clear any stale resume marker so a later
+    # round does not wrongly re-enter resume mode.
+    rm -f "$plan_work_dir/dirty_after_fix_failure" "$plan_work_dir/.resume_fix_feedback"
 
     review_rounds_completed=$i
     echo "reviews_done=$i" > "$plan_work_dir/state"
