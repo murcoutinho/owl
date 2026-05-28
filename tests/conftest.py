@@ -293,6 +293,9 @@ class FakeLLM:
         self.calls: list[LLMCall] = []
         self.script: list = []  # list[LLMResult] popped in order
         self.diff_writer = None  # Callable[[Path], None] | None
+        # responder(call) -> LLMResult | None. When it returns non-None, that
+        # result is used. Lets tests answer reviewer vs fix prompts differently.
+        self.responder = None
         self.cwd: Path | None = None
 
     def run(
@@ -308,9 +311,12 @@ class FakeLLM:
         from owl.subprocess_.llm import LLMResult
 
         prompt = Path(prompt_path).read_text() if Path(prompt_path).exists() else ""
-        self.calls.append(
-            LLMCall(provider, model, prompt, session_id, session_mode, cwd)
-        )
+        call = LLMCall(provider, model, prompt, session_id, session_mode, cwd)
+        self.calls.append(call)
+        if self.responder is not None:
+            res = self.responder(call)
+            if res is not None:
+                return res
         if self.diff_writer and cwd is not None:
             self.diff_writer(Path(cwd))
         if self.script:
