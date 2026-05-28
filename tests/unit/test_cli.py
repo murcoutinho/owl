@@ -60,12 +60,14 @@ def test_validate_with_unknown_repo_returns_two(
     assert "not in OWL_TARGET_REPOS" in out
 
 
-def test_run_plan_is_not_implemented_yet(tmp_path: Path, capsys):
-    p = _write_plan(tmp_path / "x.md", "---\nrepo: saudade\n---\n")
+def test_run_plan_rejects_invalid_plan(tmp_path: Path, monkeypatch, capsys):
+    # A plan missing the required repo: field must be rejected (exit 2) before
+    # any LLM is invoked.
+    monkeypatch.setenv("OWL_TARGET_REPOS", "saudade")
+    monkeypatch.setenv("OWL_SKIP_ENV_LOCAL", "1")
+    p = _write_plan(tmp_path / "x.md", "---\nreview-rounds: 1\n---\nbody\n")
     rc = cli.main(["--run-plan", str(p)])
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "not yet implemented" in err
+    assert rc == 2
 
 
 def test_no_args_prints_help(capsys):

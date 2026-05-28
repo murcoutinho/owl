@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .config import Config
+from .gh_ops import GhLike
 from .git_ops import GitClient, GitLike
 from .subprocess_.llm import LLMResult
 
@@ -54,3 +55,5 @@ class Deps:
     log: Callable[[str], None] = field(default=lambda _m: None)
     # ack_watcher(label, ack_path) -> context manager
     ack_watcher: Callable[..., Any] = _noop_ack
+    # gh client for opening PRs. None → runner builds a real GhClient.
+    gh: GhLike | None = None

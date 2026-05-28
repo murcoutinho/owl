@@ -331,3 +331,37 @@ class FakeLLM:
 @pytest.fixture
 def fake_llm() -> FakeLLM:
     return FakeLLM()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FakeGh
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PrCreateCall:
+    repo_root: Path
+    base: str
+    title: str
+    body: str
+
+
+class FakeGh:
+    def __init__(self) -> None:
+        self.created: list[PrCreateCall] = []
+        self.auth = True
+        self.url_template = "https://github.com/test/{repo}/pull/1"
+
+    def pr_create(self, repo_root: Path, *, base: str, title: str, body: str):
+        from owl.gh_ops import PrResult
+
+        self.created.append(PrCreateCall(Path(repo_root), base, title, body))
+        return PrResult(ok=True, url=self.url_template.format(repo=Path(repo_root).name))
+
+    def auth_ok(self) -> bool:
+        return self.auth
+
+
+@pytest.fixture
+def fake_gh() -> FakeGh:
+    return FakeGh()

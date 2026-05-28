@@ -16,7 +16,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from .config import Config, load_env_local
@@ -79,18 +78,38 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report.all_ok else 1
 
     if args.run_plan:
-        # Queue runner / plan executor lands in the next slice of the rewrite.
-        # Until then, --run-plan is not implemented in the Python port — fall
-        # back to bash from your shell if you need it now.
-        print(
-            "owl: --run-plan is not yet implemented in the Python port. "
-            "Use ./src/owl.sh --run-plan <plan> for now.",
-            file=sys.stderr,
-        )
-        return 1
+        return _run_single_plan(Path(args.run_plan), cfg)
 
     parser.print_help()
     return 0
+
+
+def _run_single_plan(plan_path: Path, cfg: Config) -> int:
+    """Run exactly one plan via the Python runner and report the outcome."""
+    from .deps import Deps
+    from .log import log as log_fn
+    from .plans.model import Plan
+    from .runner import PlanRunOutcome, run_plan
+    from .subprocess_.llm import LLMRunner
+
+    work_root = cfg.project_dir / ".work"
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    runner = LLMRunner(
+        timeout=cfg.llm_timeout,
+        max_retries=cfg.max_retries,
+        retry_wait=cfg.retry_wait,
+        log=log_fn,
+    )
+    deps = Deps(cfg=cfg, llm=runner, log=log_fn)
+    plan = Plan.load(
+        plan_path,
+        default_review_rounds=cfg.review_iterations,
+        max_review_rounds=cfg.max_review_rounds,
+    )
+    result = run_plan(plan, deps, work_root=work_root)
+    log_fn(f"Plan '{plan.name}' finished: {result.outcome}")
+    return 0 if result.outcome != PlanRunOutcome.INVALID else 2
 
 
 if __name__ == "__main__":
