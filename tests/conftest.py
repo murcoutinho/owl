@@ -315,7 +315,11 @@ class FakeLLM:
             self.diff_writer(Path(cwd))
         if self.script:
             return self.script.pop(0)
-        return LLMResult(rc=0, output="", elapsed_sec=1, timed_out=False, rate_limited=False)
+        # A real coder always emits some text; default to non-empty so callers
+        # that treat empty output as failure (execute_plan) see a success.
+        return LLMResult(
+            rc=0, output="ok\n", elapsed_sec=1, timed_out=False, rate_limited=False
+        )
 
 
 @pytest.fixture
