@@ -30,13 +30,16 @@ def _is_fix(prompt: str) -> bool:
 # ─── LGTM short-circuit ──────────────────────────────────────────────────────
 
 
-def test_review_lgtm_short_circuits(pending_ctx, fake_llm):
+def test_review_lgtm_short_circuits(pending_ctx, fake_llm, logs):
     ctx, deps = pending_ctx(review_rounds=2)
     fake_llm.responder = lambda call: _ok("LGTM") if _is_reviewer(call.prompt) else None
 
     result = run_review_loop(ctx, deps, plan_content="Do the work.")
     assert result.outcome == ReviewOutcome.READY_TO_PUSH
     assert result.reviews_completed == 1  # broke after round 1
+    # New log surface: per-reviewer verdict + iteration gate summary.
+    assert any("iter 1: LGTM" in line for line in logs)
+    assert any("all LGTM → push" in line for line in logs)
 
 
 # ─── failing tests block LGTM ───────────────────────────────────────────────
@@ -76,7 +79,7 @@ def test_failing_tests_block_lgtm(pending_ctx, fake_llm, git_universe, monkeypat
 # ─── fix commits, then LGTM ─────────────────────────────────────────────────
 
 
-def test_fix_then_pass(pending_ctx, fake_llm, git_universe):
+def test_fix_then_pass(pending_ctx, fake_llm, git_universe, logs):
     ctx, deps = pending_ctx(review_rounds=2)
     state = {"round": 0}
 
@@ -93,6 +96,11 @@ def test_fix_then_pass(pending_ctx, fake_llm, git_universe):
     fake_llm.responder = responder
     result = run_review_loop(ctx, deps, plan_content="Do the work.")
     assert result.outcome == ReviewOutcome.READY_TO_PUSH
+    # Round-1 reviewer findings surface, fix commit logs the new hash,
+    # round-2 LGTM closes the loop.
+    assert any('iter 1: findings — "Fix the null check' in line for line in logs)
+    assert any("Fix iter 1: committed" in line for line in logs)
+    assert any("iter 2: LGTM" in line for line in logs)
 
 
 # ─── dirty-after-fix under cap → resume waiting ─────────────────────────────

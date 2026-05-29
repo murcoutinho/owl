@@ -71,6 +71,8 @@ def run_reviewers(
 
     v1 = _verdict_for(cfg.reviewer1, r1)
     v2 = _verdict_for(cfg.reviewer2, r2)
+    _log_verdict(deps.log, cfg.reviewer1, v1, r1, iteration, num=1)
+    _log_verdict(deps.log, cfg.reviewer2, v2, r2, iteration, num=2)
     combined = build_combined_review(
         reviewer1_label=cfg.reviewer1.label or "Reviewer 1",
         reviewer1_verdict=v1,
@@ -121,3 +123,24 @@ def _verdict_for(slot: LLMSlot, result) -> str:
     if not slot.enabled:
         return "LGTM"
     return extract_verdict(result.output)
+
+
+def _log_verdict(log, slot: LLMSlot, verdict: str, result, iteration: int, *, num: int) -> None:
+    """Log a one-line per-reviewer summary so the verdict isn't buried in .work/."""
+    label = slot.label or f"Reviewer {num}"
+    if not slot.enabled:
+        log(f"  [{label}] iter {iteration}: disabled (synthetic LGTM)")
+        return
+    if not result.ok:
+        log(f"  [{label}] iter {iteration}: FAILED (exit={result.rc})")
+        return
+    if is_lgtm(verdict):
+        log(f"  [{label}] iter {iteration}: LGTM")
+        return
+    # Has findings — surface the first non-empty line so it's visible at a glance.
+    first_line = next(
+        (line.strip() for line in verdict.splitlines() if line.strip()), ""
+    )
+    if len(first_line) > 140:
+        first_line = first_line[:140] + "…"
+    log(f"  [{label}] iter {iteration}: findings — \"{first_line}\"")

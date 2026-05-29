@@ -130,6 +130,11 @@ def run_fix_phase(
     wd.dirty_after_fix_failure.unlink(missing_ok=True)
     wd.resume_fix_feedback.unlink(missing_ok=True)
     wd.state.write_text(f"reviews_done={iteration}\n")
+    if norm.committed:
+        hashes = ", ".join(e.after_hash[:7] for e in norm.committed)
+        log(f"  Fix iter {iteration}: committed ({hashes})")
+    else:
+        log(f"  Fix iter {iteration}: no new commit (nothing to commit)")
     return FixResult(FixOutcome.COMMITTED)
 
 

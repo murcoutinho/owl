@@ -94,11 +94,14 @@ def run_review_loop(ctx: PlanContext, deps: Deps, *, plan_content: str) -> Revie
                               reviews_done=reviews_completed,
                               reason="all reviewers failed (rate-limited or tool crash)")
 
+        tests_marker = "ok" if review.tests_ok else "FAIL"
         if review.lgtm:
-            log("All enabled reviewers say LGTM and tests passed. No fixes needed.")
+            log(f"[Iteration {i}/{total_iterations}] gate: tests={tests_marker}, all LGTM → push")
             break
-        if not review.tests_ok:
-            log("Deterministic tests failed — fix phase will address them.")
+        log(
+            f"[Iteration {i}/{total_iterations}] gate: tests={tests_marker} — "
+            f"findings remain → fix phase"
+        )
 
         fix = run_fix_phase(
             ctx, deps,
