@@ -149,8 +149,11 @@ class Config:
             else Path(project_dir) / "owl" / ".work"
         )
 
+        # Defaults match how this operator runs owl in practice: Opus 4.7 for
+        # implement+fix, two Codex reviewers (GPT-5.5 and GPT-5.3-codex).
+        # ``.env.local`` overrides these per-deployment.
         impl_provider = _normalize_provider(env.get("OWL_IMPL_PROVIDER", "claude"))
-        impl_model = env.get("OWL_IMPL_MODEL", "claude-sonnet-4-6")
+        impl_model = env.get("OWL_IMPL_MODEL", "claude-opus-4-7")
         impl = LLMSlot(provider=impl_provider, model=impl_model)
 
         fix_provider = _normalize_provider(env.get("OWL_FIX_PROVIDER", impl_provider))
@@ -158,14 +161,14 @@ class Config:
         fix = LLMSlot(provider=fix_provider, model=fix_model)
 
         reviewer1 = LLMSlot(
-            provider=_normalize_provider(env.get("OWL_REVIEWER1_PROVIDER", "claude")),
-            model=env.get("OWL_REVIEWER1_MODEL", "claude-sonnet-4-6"),
-            label=env.get("OWL_REVIEWER1_LABEL", "Claude Code 1"),
+            provider=_normalize_provider(env.get("OWL_REVIEWER1_PROVIDER", "codex")),
+            model=env.get("OWL_REVIEWER1_MODEL", "gpt-5.5"),
+            label=env.get("OWL_REVIEWER1_LABEL", "Codex GPT 5.5"),
         )
         reviewer2 = LLMSlot(
-            provider=_normalize_provider(env.get("OWL_REVIEWER2_PROVIDER", "claude")),
-            model=env.get("OWL_REVIEWER2_MODEL", "claude-sonnet-4-6"),
-            label=env.get("OWL_REVIEWER2_LABEL", "Claude Code 2"),
+            provider=_normalize_provider(env.get("OWL_REVIEWER2_PROVIDER", "codex")),
+            model=env.get("OWL_REVIEWER2_MODEL", "gpt-5.3-codex"),
+            label=env.get("OWL_REVIEWER2_LABEL", "Codex GPT 5.3 Codex"),
         )
 
         review_mode_raw = (env.get("OWL_REVIEW_MODE") or "parallel").strip().lower()

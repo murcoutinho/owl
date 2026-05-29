@@ -94,10 +94,16 @@ def test_config_target_repos_empty_when_unset():
 
 def test_config_provider_defaults():
     cfg = Config.from_env({"OWL_TARGET_REPOS": "saudade"})
+    # Implementer + fixer default to Claude Opus 4.7.
     assert cfg.impl.provider == "claude"
+    assert cfg.impl.model == "claude-opus-4-7"
     assert cfg.fix.provider == "claude"
-    assert cfg.reviewer1.provider == "claude"
-    assert cfg.reviewer2.provider == "claude"
+    assert cfg.fix.model == "claude-opus-4-7"
+    # Reviewers default to the two Codex models (GPT-5.5 and GPT-5.3-codex).
+    assert cfg.reviewer1.provider == "codex"
+    assert cfg.reviewer1.model == "gpt-5.5"
+    assert cfg.reviewer2.provider == "codex"
+    assert cfg.reviewer2.model == "gpt-5.3-codex"
 
 
 def test_config_fix_provider_defaults_to_impl_when_unset():
