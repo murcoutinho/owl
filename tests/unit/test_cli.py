@@ -70,11 +70,30 @@ def test_run_plan_rejects_invalid_plan(tmp_path: Path, monkeypatch, capsys):
     assert rc == 2
 
 
-def test_no_args_prints_help(capsys):
-    rc = cli.main([])
+def test_dash_h_prints_help(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["-h"])
     out = capsys.readouterr().out
-    assert rc == 0
+    assert exc.value.code == 0
     assert "Agentic plan queue" in out
+
+
+def test_once_runs_one_cycle(tmp_path: Path, monkeypatch):
+    """--once must call check_plans exactly once and exit, not loop."""
+    monkeypatch.setenv("OWL_TARGET_REPOS", "saudade")
+    monkeypatch.setenv("OWL_SKIP_ENV_LOCAL", "1")
+    monkeypatch.setenv("OWL_PLAN_DIR", str(tmp_path / "plan"))
+    monkeypatch.setenv("OWL_WORK_DIR", str(tmp_path / "work"))
+
+    calls: list[int] = []
+    import owl.runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod, "check_plans", lambda deps, *, work_root, plan_dir: calls.append(1)
+    )
+    rc = cli.main(["--once"])
+    assert rc == 0
+    assert len(calls) == 1
 
 
 def test_mutually_exclusive_modes_error(capsys):

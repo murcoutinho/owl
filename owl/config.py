@@ -109,6 +109,8 @@ def _normalize_provider(value: str) -> Provider:
 class Config:
     target_repos: tuple[str, ...]
     project_dir: Path
+    plan_dir: Path
+    work_dir: Path
 
     impl: LLMSlot
     fix: LLMSlot
@@ -135,6 +137,17 @@ class Config:
     def from_env(cls, env: Mapping[str, str], *, project_dir: Path | None = None) -> Config:
         target_repos = tuple(env.get("OWL_TARGET_REPOS", "").split())
         project_dir = project_dir or Path(env.get("OWL_PROJECT_DIR", "")).expanduser() or Path.cwd()
+        # Defaults match bash owl: PLAN_DIR=<project>/owl/plan, WORK_DIR=<project>/owl/.work
+        plan_dir = (
+            Path(env["OWL_PLAN_DIR"]).expanduser()
+            if env.get("OWL_PLAN_DIR")
+            else Path(project_dir) / "owl" / "plan"
+        )
+        work_dir = (
+            Path(env["OWL_WORK_DIR"]).expanduser()
+            if env.get("OWL_WORK_DIR")
+            else Path(project_dir) / "owl" / ".work"
+        )
 
         impl_provider = _normalize_provider(env.get("OWL_IMPL_PROVIDER", "claude"))
         impl_model = env.get("OWL_IMPL_MODEL", "claude-sonnet-4-6")
@@ -174,6 +187,8 @@ class Config:
         return cls(
             target_repos=target_repos,
             project_dir=Path(project_dir),
+            plan_dir=plan_dir,
+            work_dir=work_dir,
             impl=impl,
             fix=fix,
             reviewer1=reviewer1,

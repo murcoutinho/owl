@@ -24,10 +24,10 @@ def configure(log_file: Path | None) -> None:
     _log_file = log_file
 
 
-def log(message: str, *, stream: IO[str] = sys.stdout) -> None:
+def log(message: str, *, stream: IO[str] | None = None) -> None:
     """Write ``[timestamp] message`` to stdout and (if configured) the log file."""
     line = f"[{_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
-    print(line, file=stream)
+    print(line, file=stream if stream is not None else sys.stdout)
     if _log_file is not None:
         with _log_file.open("a") as f:
             f.write(line + "\n")
