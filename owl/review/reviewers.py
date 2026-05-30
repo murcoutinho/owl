@@ -1,6 +1,6 @@
 """Run the two reviewer slots and compute the LGTM gate.
 
-Ports the reviewer-spawn block (owl.sh:1692-1851). Each slot is claude, codex,
+Ports the reviewer-spawn block. Each slot is claude, codex,
 or none; a disabled slot contributes a synthetic ``LGTM``. Reviewers run in
 parallel (threads) or sequentially per ``OWL_REVIEW_MODE``. Output is run
 through ``verdict.extract_verdict`` to strip codex transcript noise, then

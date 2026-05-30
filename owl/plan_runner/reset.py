@@ -1,6 +1,6 @@
 """Reset a plan's repos to their base branch before execution.
 
-Ports ``reset_all_repos_to_base`` (owl.sh:1121-1194) and ``switch_all_to_main``.
+Ports ``reset_all_repos_to_base`` and ``switch_all_to_main``.
 The stale-ref guard is preserved: we require the explicit ``fetch`` to succeed
 before trusting ``refs/remotes/origin/<base>``, so a cached ref from an earlier
 run (when a now-merged base plan was still in flight) cannot pin a dependent

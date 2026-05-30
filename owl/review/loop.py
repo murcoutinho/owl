@@ -1,7 +1,6 @@
 """The review/fix iteration state machine.
 
-Ports run_review_loop (owl.sh:1796-2253, minus push/done which the runner
-drives). For each iteration: run deterministic tests, run reviewers, check the
+For each iteration: run deterministic tests, run reviewers, check the
 LGTM gate, and if not satisfied run the fix phase. The loop returns a
 ``ReviewLoopResult`` describing the terminal transition:
 

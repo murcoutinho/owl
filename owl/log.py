@@ -1,6 +1,6 @@
 """Timestamped logging to stdout and an optional log file.
 
-Mirrors the ``log()`` shell function (owl.sh:223-225) — every message gets
+Mirrors the ``log()`` shell function — every message gets
 the ``[YYYY-MM-DD HH:MM:SS]`` prefix and is duplicated to both stdout and
 ``$LOG_FILE`` when one is configured.
 

@@ -1,4 +1,4 @@
-"""Push the plan branch and open PRs. Ports push_and_open_prs (owl.sh:1387-1482).
+"""Push the plan branch and open PRs. Ports push_and_open_prs.
 
 For each repo that has the plan branch with commits beyond its PR base: push
 with upstream tracking and open a PR via gh. The PR base defaults to the repo's

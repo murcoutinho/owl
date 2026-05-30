@@ -1,6 +1,6 @@
 """Execute a plan: steps 2-5 (workspace, reset, LLM, branch+commit, mark pending).
 
-Ports the body of ``execute_plan`` up to the review loop (owl.sh:1356-1468).
+Ports the body of ``execute_plan`` up to the review loop.
 The review loop itself is driven by the caller (the runner), so this function
 is testable in isolation: it returns an ``ExecuteResult`` describing the
 state transition rather than recursing into review.

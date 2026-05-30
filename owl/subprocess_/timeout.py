@@ -1,13 +1,11 @@
 """Run a subprocess with a hard timeout, killing the whole process group.
 
-Ports the setsid + ``kill -TERM "-$pgid"`` pattern (owl.sh:1015-1052). The
-bash version wraps the LLM in ``perl … POSIX::setsid`` so the CLI and all
-its descendants share a fresh process group; on timeout it kills the group
-so no orphaned grandchildren linger. In Python we get the same isolation
-from ``Popen(start_new_session=True)`` (which calls ``setsid``) plus
-``os.killpg``.
+The LLM CLI and all of its descendants share a fresh process group, so on
+timeout we kill the group rather than just the leader and no orphaned
+grandchildren linger. ``Popen(start_new_session=True)`` calls ``setsid``
+to create the group; ``os.killpg`` reaps it.
 
-stdin is fed from a file (the prompt), matching ``- < prompt_file`` in bash.
+stdin is fed from a file (the prompt).
 """
 
 from __future__ import annotations

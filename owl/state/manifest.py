@@ -7,10 +7,9 @@ Two TSV formats live in plan_work_dir:
 * ``review_input_N.tsv`` — written after each round. Four columns:
   ``repo_name<TAB>repo_root<TAB>base_hash<TAB>after_hash``. A repo can
   appear on multiple rows across rounds; the **last row per repo** is
-  authoritative (mirrors the bash awk pattern at owl.sh:1821).
+  authoritative.
 
-The ``NONE`` sentinel is preserved verbatim — the bash side uses it when
-a repo has no commits yet, and any divergence breaks resume.
+The ``NONE`` sentinel is used when a repo has no commits yet.
 """
 
 from __future__ import annotations
@@ -75,10 +74,7 @@ def read_manifest(path: Path) -> list[ManifestEntry]:
 
 
 def read_last_per_repo(path: Path) -> dict[str, ManifestEntry]:
-    """Return the last row per ``repo_name``.
-
-    Bash equivalent: ``awk -F '\\t' '{rows[$1]=$0} END {...}'`` (owl.sh:1821).
-    """
+    """Return the last row per ``repo_name``."""
     last: dict[str, ManifestEntry] = {}
     for entry in read_manifest(path):
         last[entry.repo_name] = entry

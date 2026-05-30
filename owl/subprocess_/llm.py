@@ -1,6 +1,6 @@
 """Dispatch a prompt to a coding/review LLM (claude, codex, or none).
 
-Ports ``run_llm`` (owl.sh:864-925). Command lines, verbatim from bash:
+Ports ``run_llm``. Command lines, verbatim from bash:
 
 * claude (resume):  claude --print --dangerously-skip-permissions --model M --resume SID -
 * claude (create):  claude --print --dangerously-skip-permissions --model M --session-id SID -

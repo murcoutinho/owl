@@ -1,7 +1,7 @@
 """Builders for the review, fix, and resume-fix prompts.
 
-Ports the heredocs in run_review_loop (owl.sh:1668-1690, 2100-2124) and
-``build_resume_fix_prompt`` (owl.sh:852-909). Kept as pure string builders so
+Ports the heredocs in run_review_loop  and
+``build_resume_fix_prompt``. Kept as pure string builders so
 they're unit-testable; the loop writes the result to disk and wraps it with
 the ack/worktree contract.
 """

@@ -2,7 +2,7 @@
 drive the queue cycle.
 
 Ties together execute → review loop → push/open PRs → done file, and the
-resume + two-pass discovery from check_plans (owl.sh:2329-2418). Each public
+resume + two-pass discovery from check_plans. Each public
 function returns a structured outcome so the CLI and tests can assert without
 parsing logs.
 

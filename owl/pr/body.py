@@ -1,4 +1,4 @@
-"""PR title and body builders. Ported from the gh heredoc (owl.sh:1456-1469)."""
+"""PR title and body builders. Ported from the gh heredoc."""
 
 from __future__ import annotations
 

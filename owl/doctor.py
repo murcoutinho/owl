@@ -1,15 +1,12 @@
 """``owl --doctor``: preflight checks for CLIs, credentials, and target repos.
 
 Reports each check as ``ok`` or ``FAIL`` to stdout. Exit code is 0 if every
-check passes, 1 otherwise. The shell side checks (owl.sh:2522-2604):
+check passes, 1 otherwise. Checks:
 
 * ``claude``, ``codex``, ``gh``, ``git`` are on ``$PATH``
 * ``gh auth status`` succeeds
 * ``OWL_TARGET_REPOS`` is set
 * Each target repo exists under ``$PROJECT_DIR/<repo_name>`` and is a git repo
-
-The Python port keeps the same shape so a side-by-side diff against the
-bash version produces near-identical text.
 """
 
 from __future__ import annotations

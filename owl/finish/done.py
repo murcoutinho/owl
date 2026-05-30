@@ -1,5 +1,5 @@
 """Write the per-plan done file and clear transient state. Ports write_done_file
-(owl.sh:1660-1722).
+.
 
 The done file archives the plan body plus an execution summary (repos changed,
 PRs opened, per-round review feedback) into ``plan/done/``. After writing it,

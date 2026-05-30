@@ -1,7 +1,7 @@
 """The fix phase, including dirty-after-fix recovery and quarantine.
 
-Ports the fix block of run_review_loop (owl.sh:2067-2253) plus
-``capture_dirty_snapshot`` (owl.sh:815-847). This is the function that plan
+Ports the fix block of run_review_loop plus
+``capture_dirty_snapshot``. This is the function that plan
 286 stress-tested: when the fixer leaves the worktree uncommittable, owl must
 preserve the dirt, arm a resume prompt, and after FIX_FAILURE_CAP attempts
 quarantine the plan rather than loop forever.

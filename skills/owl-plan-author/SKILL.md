@@ -206,7 +206,7 @@ Owl executes plans inside a temporary git worktree, NOT in the original repo dir
 
 A plan that violates this rule is the most common cause of the "Plan produced no changes in any repo" failure — Claude will follow the absolute path verbatim, edit the source repo, and Owl's worktree inspection will find nothing to commit.
 
-Owl ships a standalone linter (`src/lint_plan.sh`) for this rule. Run it on your draft **before** dropping the plan into `owl/plan/` — it is a pre-queue author tool, never invoked by Owl at runtime. See Step 6b for the command and exit semantics.
+Owl ships a standalone linter (`owl --lint`) for this rule. Run it on your draft **before** dropping the plan into `owl/plan/` — it is a pre-queue author tool, never invoked by Owl at runtime. See Step 6b for the command and exit semantics.
 
 ### 3. Existing files to anchor on
 File paths + approximate line numbers for code the plan depends on or will modify. Include short snippets when context matters. **Read the files before writing these — never guess line numbers.** Absolute paths are acceptable here — these are read before execution to verify the plan is grounded in real code.
@@ -334,10 +334,10 @@ Re-read the draft. Ask: "Could a fresh agent with no conversation history execut
 
 ## Step 6b — Lint the draft before queueing
 
-Owl ships a **standalone pre-queue linter** — a small bash script that enforces the Step 2 / Step 6 edit-target path rule. It is deliberately separate from Owl's runtime (`src/owl.sh`); Owl never invokes the linter during plan execution. Authors invoke it explicitly before moving a plan into `owl/plan/`.
+Owl ships a **standalone pre-queue linter** as the `owl --lint` subcommand. It enforces the Step 2 / Step 6 edit-target path rule and the Step 4 §5 no-plan-references sentinel. It is deliberately separate from Owl's runtime (Owl never invokes the linter during plan execution); authors invoke it explicitly before moving a plan into `owl/plan/`.
 
 ```sh
-cd /path/to/owl && ./src/lint_plan.sh path/to/your-draft-plan.md
+owl --lint path/to/your-draft-plan.md
 ```
 
 Output:

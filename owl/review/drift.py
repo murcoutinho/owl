@@ -1,6 +1,6 @@
 """Manifest drift detection and auto-heal on resume.
 
-Ports the resume drift block (owl.sh:1796-1841). When resuming, each repo's
+Ports the resume drift block. When resuming, each repo's
 actual HEAD is compared to the last-recorded head in the next-iteration
 manifest. If they differ (an interrupted commit landed, a manual amend, etc.),
 git is the source of truth: we append a corrected line so the diff range

@@ -1,6 +1,6 @@
 """Run per-repo deterministic test suites before reviewers see the diff.
 
-Ports ``run_deterministic_tests`` (owl.sh:412-490). For each repo with an
+Ports ``run_deterministic_tests``. For each repo with an
 ``OWL_TEST_CMD_<repo>`` configured, run optional setup then the command in the
 repo's worktree. Any failure is written to a markdown summary that gets folded
 into the combined review, and the gate is: failing tests block the LGTM

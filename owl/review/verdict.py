@@ -5,7 +5,7 @@ Codex wraps its model output in a transcript that includes ``codex`` /
 block — that's the verdict. Claude does not produce this transcript, so
 for Claude we just trim and return the file as-is.
 
-Mirrors ``extract_reviewer_verdict`` (owl.sh:380-393). The fallback to
+Mirrors ``extract_reviewer_verdict``. The fallback to
 "trimmed full text when no codex markers" is critical: a Claude reviewer
 should be treated as having its entire stdout as the verdict, otherwise
 we'd silently drop reviewer output.
@@ -52,9 +52,7 @@ def extract_verdict(raw: str) -> str:
 def is_lgtm(verdict: str) -> bool:
     """Return True if the (trimmed) verdict is exactly ``LGTM``.
 
-    The bash side checks ``[ "$(cat … | tr -d '[:space:]')" = "LGTM" ]``
-    (owl.sh:2054). We are slightly stricter: we strip whitespace but do
-    not flatten internal characters, since a "LGTM" buried in a paragraph
-    is not a clean approval.
+    Outer whitespace is stripped, but internal characters are not flattened
+    — a "LGTM" buried in a paragraph is not a clean approval.
     """
     return verdict.strip().upper() == "LGTM"

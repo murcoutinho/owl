@@ -1,6 +1,6 @@
 """Wrap a base prompt with the proof-of-life ack directive and worktree contract.
 
-Ports ``prepend_ack_prompt`` (owl.sh:254-315). The wrapped prompt:
+Ports ``prepend_ack_prompt``. The wrapped prompt:
 
 1. Tells the agent to write ``alive`` to an ack file as its FIRST action.
 2. (When a worktree root is given that differs from the project dir) injects

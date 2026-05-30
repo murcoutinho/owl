@@ -1,8 +1,8 @@
 """Commit a plan's worktree changes onto its branch, recording the manifest.
 
-Ports ``ensure_plan_branch_checked_out`` (owl.sh:616-662),
-``normalize_repo_changes_for_plan`` (owl.sh:664-738) and
-``normalize_all_plan_repos`` (owl.sh:740-781).
+Ports ``ensure_plan_branch_checked_out``,
+``normalize_repo_changes_for_plan`` and
+``normalize_all_plan_repos``.
 
 The stash-then-checkout recovery in ``ensure_branch_checked_out`` is faithfully
 ported. It is now safe because, with the single ``repo:`` field, normalize only

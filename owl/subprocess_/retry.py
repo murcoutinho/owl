@@ -1,7 +1,7 @@
 """Rate-limit detection and the retry-with-backoff loop.
 
 Ported from ``is_rate_limited`` / ``rate_limit_excerpt`` / ``retry_on_limit``
-(owl.sh:962-1113). The key subtleties preserved:
+. The key subtleties preserved:
 
 * The rate-limit regex requires HTTP-status context for ``429`` so it does
   not false-positive on code references like ``models.py:429:``.

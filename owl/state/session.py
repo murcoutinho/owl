@@ -4,7 +4,7 @@ Owl stashes a UUID in ``plan_work_dir/coder_session_id`` so the fix phase can
 ``claude --resume <uuid>`` into the same conversation the coder used, keeping
 file-read context warm across iterations. Ported from
 ``get_or_create_coder_session_id`` / ``load_coder_session_id``
-(owl.sh:927-946).
+.
 """
 
 from __future__ import annotations

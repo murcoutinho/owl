@@ -1,15 +1,18 @@
 """Command-line entry point.
 
-Implements ``--validate <plan>``, ``--doctor``, and (placeholder) ``--run-plan``.
-The full queue runner and plan-execution machinery is built in subsequent
-modules; this CLI ships first so the operator can run ``--validate`` and
-``--doctor`` against the new Python implementation while bash still drives
-the production queue.
+Subcommands:
+
+* ``owl`` (no args) — default queue loop, poll ``plan/`` forever.
+* ``owl --once`` — run one queue cycle (resume + new plans), exit.
+* ``owl --run-plan PLAN`` — run a single plan and exit.
+* ``owl --validate PLAN`` — parse a plan; no LLM, no git.
+* ``owl --lint PLAN`` — pre-queue author lint (edit-target paths + sentinel).
+* ``owl --doctor`` — check CLIs, credentials, and configured target repos.
 
 Exit codes:
 
 * ``0`` — success
-* ``1`` — doctor reported failures, or generic runtime error
+* ``1`` — doctor reported failures, lint violations, or generic runtime error
 * ``2`` — invalid arguments or invalid plan
 """
 
@@ -21,6 +24,8 @@ from pathlib import Path
 from .config import Config, load_env_local
 from .doctor import format_report as format_doctor
 from .doctor import run_doctor
+from .lint_plan import format_report as format_lint
+from .lint_plan import lint_plan
 from .validate import format_report as format_validate
 from .validate import validate_plan
 
@@ -51,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run one queue cycle (resume + new plans) and exit. No poll loop.",
     )
+    mode.add_argument(
+        "--lint",
+        metavar="PLAN",
+        help="Lint a draft plan for edit-target paths and the no-plan-references sentinel.",
+    )
     parser.add_argument(
         "--skip-low-priority",
         action="store_true",
@@ -77,6 +87,15 @@ def main(argv: list[str] | None = None) -> int:
         print(format_validate(report))
         return 0 if report.ok else 2
 
+    if args.lint:
+        plan_path = Path(args.lint)
+        if not plan_path.is_file():
+            print(f"lint_plan: file not found: {plan_path}")
+            return 2
+        report = lint_plan(plan_path)
+        print(format_lint(report))
+        return 0 if report.ok else 1
+
     if args.doctor:
         report = run_doctor(cfg)
         print(format_doctor(report))
@@ -88,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         return _run_queue_once(cfg)
 
-    # Default: queue loop. Matches `./src/owl.sh` with no flags.
+    # Default: queue loop.
     return _run_queue_loop(cfg)
 
 
@@ -138,7 +157,7 @@ def _run_queue_once(cfg: Config) -> int:
 def _run_queue_loop(cfg: Config) -> int:
     """Default mode: loop forever, polling for plans every poll_interval seconds.
 
-    Matches bash ``./src/owl.sh`` with no flags. Ctrl-C is the clean exit.
+    Ctrl-C is the clean exit.
     """
     import time
 

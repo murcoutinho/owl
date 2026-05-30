@@ -5,9 +5,8 @@ telling the agent to write ``alive`` to an ack file as its very first action.
 This watcher polls for that file and logs once it appears, so the operator
 sees the agent is alive even though its stdout is invisible until it returns.
 
-The bash version backgrounds a polling subshell (owl.sh:317-355). Here we use
-a daemon thread with a stop event, exposed as a context manager so callers
-can't forget to stop it.
+Implemented as a daemon thread with a stop event, exposed as a context
+manager so callers can't forget to stop it.
 """
 
 from __future__ import annotations

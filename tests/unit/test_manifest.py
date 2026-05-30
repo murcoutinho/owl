@@ -1,8 +1,8 @@
 """Unit tests for owl.state.manifest.
 
 The ``review_input_N.tsv`` last-line-per-repo aggregation is load-bearing —
-drift detection (owl.sh:1796-1841) and per-round diff calculation both
-depend on it. These tests pin that contract.
+drift detection and per-round diff calculation both depend on it. These
+tests pin that contract.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ def test_manifest_last_per_repo_takes_final_row(tmp_path: Path):
 
 
 def test_manifest_none_sentinel_preserved(tmp_path: Path):
-    """The bash side writes ``NONE`` when a repo has no prior HEAD; we keep it."""
+    """``NONE`` is the sentinel used when a repo has no prior HEAD."""
     p = tmp_path / "review_input_1.tsv"
     e = ManifestEntry("raven", "/r", "NONE", "abc123")
     append_manifest_row(p, e)

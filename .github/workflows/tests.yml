@@ -6,10 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  bash-tests:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run bash test suite
-        run: bash tests/run_tests.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Configure git identity (integration tests need it)
+        run: |
+          git config --global user.email owl-ci@example.test
+          git config --global user.name "Owl CI"
+
+      - name: Lint
+        run: ruff check owl/ tests/
+
+      - name: Test
+        run: pytest -q

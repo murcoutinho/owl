@@ -1,6 +1,6 @@
 """Quarantine a plan that failed the fix phase FIX_FAILURE_CAP times.
 
-Ports ``quarantine_plan`` (owl.sh:916-970). Moves the plan ``.md`` into
+Ports ``quarantine_plan``. Moves the plan ``.md`` into
 ``plan/quarantine/`` (mirroring ``plan/done/``) so the queue never re-picks it,
 removes the ``pending`` marker so resume skips it, and writes a ``quarantined``
 metadata marker. The caller returns 0 so the queue keeps draining.
