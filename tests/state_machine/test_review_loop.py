@@ -72,7 +72,9 @@ def test_failing_tests_block_lgtm(pending_ctx, fake_llm, git_universe, monkeypat
     )
 
     result = run_review_loop(ctx, deps, plan_content="Do the work.")
-    assert fix_ran["count"] == 1  # LGTM did NOT short-circuit; fix ran
+    # Tests fail → LGTM does NOT short-circuit; fix runs in iter 1 AND in the
+    # verification pass (because tests are still failing after iter 1's fix).
+    assert fix_ran["count"] == 2
     assert result.outcome == ReviewOutcome.READY_TO_PUSH
 
 
@@ -233,6 +235,50 @@ def test_all_reviewers_failed_keeps_pending(pending_ctx, fake_llm):
 
 
 # ─── fix LLM failure → llm_abort ────────────────────────────────────────────
+
+
+def test_verification_pass_catches_unaddressed_findings(pending_ctx, fake_llm, git_universe, logs):
+    """Regression for PRs #361 and #249 shipping with unaddressed findings.
+
+    Setup: 1 review round configured. Iter 1 reviewers flag a real defect.
+    The fixer "agrees with the plan" and produces no new commit. Without the
+    verification pass owl would push with the finding hanging. With the
+    verification pass, owl re-reviews, sees the finding still present, and
+    runs one final fix.
+    """
+    ctx, deps = pending_ctx(review_rounds=1)
+    state = {"verification_fix_ran": False}
+
+    def responder(call):
+        if _is_reviewer(call.prompt):
+            return _ok("High: race condition in <something>")  # always finds something
+        if _is_fix(call.prompt):
+            if state["verification_fix_ran"]:
+                # Second (verification) fix: commit something so loop ends clean.
+                git_universe.state(ctx.worktree_repo_root).dirty = True
+                return _ok("addressed it on the final pass")
+            # First fix (iter 1 main loop): no commit — fixer punts.
+            state["verification_fix_ran"] = True
+            return _ok("plan wins; no change")
+        return None
+
+    fake_llm.responder = responder
+    result = run_review_loop(ctx, deps, plan_content="Do the work.")
+
+    assert result.outcome == ReviewOutcome.READY_TO_PUSH
+    # The verification pass ran (iter 2 = N+1), and a final fix landed a commit.
+    assert any("[Verification] iter 2" in line for line in logs)
+    assert any("one final fix attempt" in line for line in logs)
+    assert any("Fix iter 2: committed" in line for line in logs)
+
+
+def test_verification_pass_skipped_when_main_loop_lgtms(pending_ctx, fake_llm, logs):
+    """If the main loop exits via LGTM, the verification pass is skipped."""
+    ctx, deps = pending_ctx(review_rounds=2)
+    fake_llm.responder = lambda call: _ok("LGTM") if _is_reviewer(call.prompt) else None
+
+    run_review_loop(ctx, deps, plan_content="Do the work.")
+    assert not any("[Verification]" in line for line in logs)
 
 
 def test_fix_llm_failure_aborts(pending_ctx, fake_llm):

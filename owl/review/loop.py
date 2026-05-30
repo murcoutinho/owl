@@ -68,6 +68,7 @@ def run_review_loop(ctx: PlanContext, deps: Deps, *, plan_content: str) -> Revie
         heal_manifest(resume_manifest, git=deps.git, log=log)
 
     reviews_completed = reviews_done
+    exited_via_lgtm = False
 
     for i in range(reviews_done + 1, total_iterations + 1):
         log("-----------------------------------------")
@@ -97,6 +98,7 @@ def run_review_loop(ctx: PlanContext, deps: Deps, *, plan_content: str) -> Revie
         tests_marker = "ok" if review.tests_ok else "FAIL"
         if review.lgtm:
             log(f"[Iteration {i}/{total_iterations}] gate: tests={tests_marker}, all LGTM → push")
+            exited_via_lgtm = True
             break
         log(
             f"[Iteration {i}/{total_iterations}] gate: tests={tests_marker} — "
@@ -120,6 +122,65 @@ def run_review_loop(ctx: PlanContext, deps: Deps, *, plan_content: str) -> Revie
         if fix.outcome == FixOutcome.QUARANTINED:
             return ReviewLoopResult(ReviewOutcome.QUARANTINED, reviews_completed, total_iterations)
         # COMMITTED → next iteration.
+
+    # ── Verification pass ──
+    # Bash owl pushed whenever the iteration loop exhausted, even if the last
+    # review had findings and the last fix didn't commit anything. That ships
+    # PRs with unaddressed reviewer feedback. The verification pass ensures the
+    # last action before push is either an LGTM review or a fix responding to a
+    # review that found things. Skipped when we already broke via LGTM.
+    if not exited_via_lgtm and reviews_completed > 0:
+        v = reviews_completed + 1
+        log("-----------------------------------------")
+        log(f"[Verification] iter {v}: re-reviewing after last fix to ensure clean exit")
+        # Seed the verification manifest from the last fix iteration's manifest
+        # (or the last reviewed one if no fix manifest exists).
+        verify_manifest = wd.review_input(v)
+        if not verify_manifest.exists() or not verify_manifest.read_text().strip():
+            prev = wd.review_input(reviews_completed)
+            verify_manifest.write_text(prev.read_text() if prev.exists() else "")
+
+        tests = run_tests(
+            repos=ctx.repos,
+            test_cmd=dict(cfg.test_cmd),
+            test_setup=dict(cfg.test_setup),
+            summary_path=wd.tests_summary(v),
+            log=log,
+        )
+        review = run_reviewers(ctx, deps, iteration=v, plan_content=plan_content, tests=tests)
+        reviews_completed = v
+
+        if review.all_reviewers_failed:
+            log(f"[Verification] all reviewers failed at iter {v}.")
+            return _llm_abort(ctx, deps, iteration=v, total=v,
+                              reviews_done=reviews_completed,
+                              reason="all reviewers failed during verification pass")
+
+        tests_marker = "ok" if review.tests_ok else "FAIL"
+        if review.lgtm:
+            log(f"[Verification] iter {v}: tests={tests_marker}, all LGTM → push")
+        else:
+            log(
+                f"[Verification] iter {v}: tests={tests_marker} — findings remain "
+                f"→ one final fix attempt before push"
+            )
+            fix = run_fix_phase(
+                ctx, deps,
+                iteration=v,
+                total_iterations=v,
+                combined_review=review.combined_review,
+                plan_content=plan_content,
+                coder_session_id=coder_session_id,
+                reviews_completed=reviews_completed,
+            )
+            if fix.outcome == FixOutcome.LLM_FAILED:
+                return _llm_abort(ctx, deps, iteration=v, total=v,
+                                  reviews_done=reviews_completed, reason=fix.reason)
+            if fix.outcome == FixOutcome.DIRTY_UNDER_CAP:
+                return ReviewLoopResult(ReviewOutcome.DIRTY_RESUME_WAITING, reviews_completed, v)
+            if fix.outcome == FixOutcome.QUARANTINED:
+                return ReviewLoopResult(ReviewOutcome.QUARANTINED, reviews_completed, v)
+            total_iterations = v  # surface the verification round in PR metadata
 
     # ── pre-push normalization (catches any stray uncommitted changes) ──
     pre_push_manifest = wd.review_input(reviews_completed + 1)
