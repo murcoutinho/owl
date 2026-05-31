@@ -11,18 +11,12 @@ Follow this guide to configure Owl. All configuration lives in `.env.local` at t
 
 ## Step 1 — Locate Owl and understand the directory model
 
-Owl expects target repos to be **sibling directories** of the `owl/` folder. The script computes:
-
-```
-PROJECT_DIR = owl/../../
-```
-
-So if Owl is at `/home/user/projects/owl/`, it looks for repos at `/home/user/projects/<repo-name>/`.
+Owl expects target repos to be **sibling directories** of the `owl/` folder. The default project directory is the parent of the `owl/` checkout — if Owl is at `/home/user/projects/owl/`, it looks for repos at `/home/user/projects/<repo-name>/`. Override with `OWL_PROJECT_DIR` if you need a different layout.
 
 **Check the current Owl location:**
 
 ```sh
-ls -la "$(dirname "$(dirname "$(readlink -f "$(which owl 2>/dev/null || echo src/owl.sh)")")")"
+python -c "import owl; import pathlib; print(pathlib.Path(owl.__file__).parent.parent)"
 ```
 
 Or simply check where the `.env.local` lives:
@@ -127,7 +121,7 @@ OWL_POLL_INTERVAL_SECONDS=600     # seconds between queue polls (default 10 min)
 Run the doctor command from the Owl directory:
 
 ```sh
-cd /path/to/owl && ./src/owl.sh --doctor
+cd /path/to/owl && owl --doctor
 ```
 
 This checks:
@@ -157,15 +151,15 @@ Restart Claude Code after installing skills.
 |----------|---------|-------------|
 | `OWL_TARGET_REPOS` | (required) | Space-separated sibling repo directory names |
 | `OWL_IMPL_PROVIDER` | `claude` | Implementation provider: `claude` or `codex` |
-| `OWL_IMPL_MODEL` | `claude-sonnet-4-6` | Implementation model |
+| `OWL_IMPL_MODEL` | `claude-opus-4-7` | Implementation model |
 | `OWL_FIX_PROVIDER` | `$OWL_IMPL_PROVIDER` | Fix-phase provider |
 | `OWL_FIX_MODEL` | `$OWL_IMPL_MODEL` | Fix-phase model |
-| `OWL_REVIEWER1_PROVIDER` | `claude` | Reviewer 1 provider: `claude`, `codex`, or `none` |
-| `OWL_REVIEWER1_MODEL` | `claude-sonnet-4-6` | Reviewer 1 model |
-| `OWL_REVIEWER1_LABEL` | `Claude Code 1` | Reviewer 1 label in logs |
-| `OWL_REVIEWER2_PROVIDER` | `claude` | Reviewer 2 provider: `claude`, `codex`, or `none` |
-| `OWL_REVIEWER2_MODEL` | `claude-sonnet-4-6` | Reviewer 2 model |
-| `OWL_REVIEWER2_LABEL` | `Claude Code 2` | Reviewer 2 label in logs |
+| `OWL_REVIEWER1_PROVIDER` | `codex` | Reviewer 1 provider: `claude`, `codex`, or `none` |
+| `OWL_REVIEWER1_MODEL` | `gpt-5.5` | Reviewer 1 model |
+| `OWL_REVIEWER1_LABEL` | `Codex GPT 5.5` | Reviewer 1 label in logs |
+| `OWL_REVIEWER2_PROVIDER` | `codex` | Reviewer 2 provider: `claude`, `codex`, or `none` |
+| `OWL_REVIEWER2_MODEL` | `gpt-5.3-codex` | Reviewer 2 model |
+| `OWL_REVIEWER2_LABEL` | `Codex GPT 5.3 Codex` | Reviewer 2 label in logs |
 | `OWL_REVIEW_MODE` | `parallel` | `parallel` or `sequential` |
 | `OWL_SKIP_LOW_PRIORITY` | `0` | Skip `priority: low` plans when `1` |
 | `OWL_TEST_CMD_<repo>` | (unset) | Test command for a repo (underscores for hyphens) |

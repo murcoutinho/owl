@@ -22,9 +22,10 @@ cp examples/001-touch-readme.md plan/001-touch-readme.md
 # Point the agent at your sandbox repo
 export OWL_TARGET_REPOS=my-sandbox-repo
 
-# Start the agent
-./src/owl.sh
+# Start the agent (queue loop)
+owl
 ```
 
 The agent picks up the plan on its next poll cycle (default: 10 minutes), or
-immediately if you just started it.
+immediately if you just started it. To run a single plan once without
+entering the queue loop, use `owl --run-plan plan/001-touch-readme.md`.

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "owl"
+version = "0.1.0"
+description = "Agentic plan queue. Picks up markdown plans, dispatches them to a coding LLM, runs reviewers, opens PRs."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+owl = "owl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["owl*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: real git operations against tmp repos; slower",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["examples", "skills"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "E501",   # line length handled by formatter
+    "SIM108", # ternary not always clearer
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]   # asserts in tests are fine
